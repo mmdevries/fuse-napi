@@ -13,20 +13,22 @@
   ],
   "main": "index.js",
   "types": "./index.d.ts",
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "files": [
-    "bin.js",
+    "COMPATIBILITY.md",
+    "README.md",
+    "UPSTREAM.md",
     "binding.gyp",
     "fuse-native.c",
     "index.d.ts",
     "index.js",
     "lib/macfuse.js",
     "prebuilds/",
-    "scripts/fuse-config.js",
-    "semaphore.h"
+    "scripts/fuse-config.js"
   ],
-  "bin": {
-    "fuse-napi": "./bin.js"
-  },
   "gypfile": true,
   "engines": {
     "node": ">=20"
@@ -64,12 +66,11 @@
   },
   "homepage": "https://github.com/mmdevries/fuse-napi#readme",
   "scripts": {
-    "check": "node --check index.js && node --check bin.js && node --check example.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js",
+    "check": "node --check index.js && node --check example.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js",
     "install": "node-gyp-build",
     "test": "tape test/*.js",
-    "test:unit": "tape test/dependencies.js test/errno.js test/mount-ready.js test/options.js",
+    "test:unit": "tape test/dependencies.js test/errno.js test/hardening.js test/mount-ready.js test/options.js",
     "clean": "rm -rf node_modules build",
-    "prebuild": "prebuildify --napi --strip",
-    "configure": "NODE=$(which node) && sudo -E $NODE ./bin.js configure || true"
+    "prebuild": "prebuildify --napi --strip"
   }
 }

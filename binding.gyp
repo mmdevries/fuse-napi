@@ -22,17 +22,36 @@
     'defines': [
       '_FILE_OFFSET_BITS=64'
     ],
+    'conditions': [
+      ['OS=="linux"', {
+        'defines': [
+          '_POSIX_C_SOURCE=200809L',
+          '_DEFAULT_SOURCE'
+        ]
+      }]
+    ],
     'xcode_settings': {
+      'GCC_C_LANGUAGE_STANDARD': 'c11',
+      'MACOSX_DEPLOYMENT_TARGET': '12.0',
       'OTHER_CFLAGS': [
-        '-g',
         '-O3',
-        '-Wall'
+        '-Wall',
+        '-Wextra',
+        '-Wconversion',
+        '-Wshadow',
+        '-Wpedantic',
+        '-Werror'
       ]
     },
     'cflags': [
-      '-g',
+      '-std=c11',
       '-O3',
-      '-Wall'
+      '-Wall',
+      '-Wextra',
+      '-Wconversion',
+      '-Wshadow',
+      '-Wpedantic',
+      '-Werror'
     ],
   }, {
     "target_name": "postinstall",

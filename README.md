@@ -23,10 +23,14 @@ Neither libfuse nor macFUSE is bundled or installed by this package. See
 
 ## Supported targets
 
-| Platform | Architectures | Node.js |
-| --- | --- | --- |
-| Linux | x86-64, arm64 | 20, 22, 24 |
-| macOS | Intel x86-64, Apple Silicon arm64 | 20, 22, 24 |
+| Platform | Minimum runtime | Architectures | Tested Node.js |
+| --- | --- | --- | --- |
+| Linux | glibc 2.31 and system libfuse 2 | x86-64, arm64 | 20, 22, 24 |
+| macOS | macOS 12 and macFUSE libfuse 2 | Intel x86-64, Apple Silicon arm64 | 20, 22, 24 |
+
+Release prebuilds are compiled on a glibc 2.31 Linux baseline and with
+`MACOSX_DEPLOYMENT_TARGET=12.0`. The release workflow rejects binaries that
+raise either minimum accidentally.
 
 ## Requirements
 
@@ -55,6 +59,10 @@ Approve the macFUSE system extension in System Settings when prompted and
 restart macOS if requested. Apple Silicon systems can additionally require
 enabling kernel extensions in Startup Security Utility from macOS Recovery.
 Installation alone is not sufficient until macFUSE is enabled.
+
+No privileged package configuration command is installed or run. Host FUSE
+installation and system-extension approval remain explicit administrator
+tasks.
 
 `fuse-napi` uses macFUSE's public libfuse 2 compatibility API and its default
 VFS backend. It does not implement FSKit directly. If the headers, dylib, or
@@ -129,9 +137,23 @@ Create a new `Fuse` object.
   name: 'Folder Name', // Volume name used with displayFolder.
   debug: false,        // Enable detailed tracing of operations.
   force: false,        // Attempt to unmount before remounting.
-  mkdir: false         // Create the mountpoint before mounting.
+  mkdir: false,        // Create the mountpoint before mounting.
+  timeout: 15000,      // Operation and mount-start timeout in milliseconds.
+  onError: (error, operation, args) => {
+    // Report exceptions thrown by an operation implementation.
+  }
 }
 ```
+
+`timeout` can also be an object such as
+`{ default: 15000, read: 30000, init: 5000 }`. Set an individual value or
+`default` to `false` to disable that timeout deliberately.
+
+Each operation callback is accepted only once. A timeout, synchronous
+exception, or rejected promise is translated to a FUSE error and cannot leave
+the native worker blocked. Return values, buffer lengths, directory entries,
+extended attributes, statistics, and mount options are validated before they
+cross the native boundary.
 
 For a larger usage example, see CoCalc's
 [WebSocketFS FUSE integration](https://github.com/sagemathinc/websocketfs/tree/main/lib/fuse).
@@ -139,6 +161,11 @@ For a larger usage example, see CoCalc's
 ### FUSE API
 
 Most of the [FUSE api](http://fuse.sourceforge.net/doxygen/structfuse__operations.html) is supported. In general the callback for each op should be called with `cb(returnCode, [value])` where the return code is a number (`0` for OK and `< 0` for errors). See below for a list of POSIX error codes.
+
+File handles, file positions, sizes, inode counters, and other 64-bit values
+are passed as a `number` while exactly representable and as a `bigint`
+otherwise. Implementations must preserve a `bigint` file handle and return it
+unchanged to their own storage layer.
 
 TypeScript: see [index.d.ts](./index.d.ts).
 
@@ -340,7 +367,9 @@ Called when a new file is being opened.
 
 #### `ops.utimens(path, atime, mtime, cb)`
 
-Called when the atime/mtime of a file is being changed.
+Called when the atime/mtime of a file is being changed. `atime` and `mtime`
+are signed integer milliseconds since the Unix epoch and can be `bigint`
+outside JavaScript's safe-integer range.
 
 #### `ops.unlink(path, cb)`
 

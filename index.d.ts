@@ -1,119 +1,119 @@
 declare namespace Fuse {
+  export type Result = number | null | undefined;
+  export type Int64 = number | bigint;
+  export type Uint64 = number | bigint;
+  export type FileHandle = Uint64;
+
   // Stats object produced by fuse-native index.js function getStatArray
   export interface Stats {
     mode?: number;
     uid?: number;
     gid?: number;
-    size?: number;
-    dev?: number;
-    nlink?: number;
-    ino?: number;
-    rdev?: number;
-    blksize?: number;
-    blocks?: number;
-    atime?: Date | number;
-    mtime?: Date | number;
-    ctime?: Date | number;
+    size?: Uint64;
+    dev?: Uint64;
+    nlink?: Uint64;
+    ino?: Uint64;
+    rdev?: Uint64;
+    blksize?: Uint64;
+    blocks?: Uint64;
+    atime?: Date | Int64;
+    mtime?: Date | Int64;
+    ctime?: Date | Int64;
+  }
+
+  export interface Statfs {
+    bsize?: Uint64;
+    frsize?: Uint64;
+    blocks?: Uint64;
+    bfree?: Uint64;
+    bavail?: Uint64;
+    files?: Uint64;
+    ffree?: Uint64;
+    favail?: Uint64;
+    fsid?: Uint64;
+    flag?: Uint64;
+    namemax?: Uint64;
   }
 
   export interface OPERATIONS {
-    init?: (cb: (err: number) => void) => void;
-    error?: (cb: (err: number) => void) => void;
-    access?: (path: string, mode: number, cb: (err: number) => void) => void;
-    statfs?: (
-        path: string,
-        cb: (
-            err: number,
-            stats?: {
-              bsize: number;
-              frsize: number;
-              blocks: number;
-              bfree: number;
-              bavail: number;
-              files: number;
-              ffree: number;
-              favail: number;
-              fsid: number;
-              flag: number;
-              namemax: number;
-            }
-        ) => void
-    ) => void;
+    init?: (cb: (err: Result) => void) => void;
+    access?: (path: string, mode: number, cb: (err: Result) => void) => void;
+    statfs?: (path: string, cb: (err: Result, stats?: Statfs) => void) => void;
     fgetattr?: (
         path: string,
-        fd: number,
-        cb: (err: number, stat?: Stats) => void
+        fd: FileHandle,
+        cb: (err: Result, stat?: Stats) => void
     ) => void;
     getattr?: (
         path: string,
-        cb: (err: number, stat?: Stats) => void
+        cb: (err: Result, stat?: Stats) => void
     ) => void;
-    flush?: (path: string, fd: number, cb: (err: number) => void) => void;
-    fsync?: (path: string, dataSync: boolean, fd: number, cb: (err: number) => void) => void;
-    fsyncdir?: (path: string, dataSync: boolean, fd: number, cb: (err: number) => void) => void;
-    readdir?: (path: string, cb: (err: number, names?: string[], stats?: Stats[]) => void) => void;
-    truncate?: (path: string, size: number, cb: (err: number) => void) => void;
-    ftruncate?: (path: string, fd: number, size: number, cb: (err: number) => void) => void;
-    utimens?: (path: string, atime: Date, mtime: Date, cb: (err: number) => void) => void;
-    readlink?: (path: string, cb: (err: number, linkName?: string) => void) => void;
-    chown?: (path: string, uid: number, gid: number, cb: (err: number) => void) => void;
-    chmod?: (path: string, mode: number, cb: (err: number) => void) => void;
-    mknod?: (path: string, mode: number, dev: number, cb: (err: number) => void) => void;
+    flush?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
+    fsync?: (path: string, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
+    fsyncdir?: (path: string, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
+    readdir?: (path: string, cb: (err: Result, names?: string[], stats?: Stats[]) => void) => void;
+    truncate?: (path: string, size: Int64, cb: (err: Result) => void) => void;
+    ftruncate?: (path: string, fd: FileHandle, size: Int64, cb: (err: Result) => void) => void;
+    utimens?: (path: string, atime: Int64, mtime: Int64, cb: (err: Result) => void) => void;
+    readlink?: (path: string, cb: (err: Result, linkName?: string) => void) => void;
+    chown?: (path: string, uid: number, gid: number, cb: (err: Result) => void) => void;
+    chmod?: (path: string, mode: number, cb: (err: Result) => void) => void;
+    mknod?: (path: string, mode: number, dev: Uint64, cb: (err: Result) => void) => void;
     setxattr?: (
         path: string,
         name: string,
         value: Buffer,
         position: number,
         flags: number,
-        cb: (err: number) => void
+        cb: (err: Result) => void
     ) => void;
     getxattr?: (
         path: string,
         name: string,
         position: number,
-        cb: (err: number, value?: Buffer | null) => void
+        cb: (err: Result, value?: Buffer | null) => void
     ) => void;
-    listxattr?: (path: string, cb: (err: number, list?: string[]) => void) => void;
-    removexattr?: (path: string, name: string, cb: (err: number) => void) => void;
-    open?: (path: string, mode: number, cb: (err: number, fd?: number) => void) => void;
-    opendir?: (path: string, mode: number, cb: (err: number, fd?: number) => void) => void;
+    listxattr?: (path: string, cb: (err: Result, list?: string[]) => void) => void;
+    removexattr?: (path: string, name: string, cb: (err: Result) => void) => void;
+    open?: (path: string, flags: number, cb: (err: Result, fd?: FileHandle) => void) => void;
+    opendir?: (path: string, flags: number, cb: (err: Result, fd?: FileHandle) => void) => void;
     read?: (
         path: string,
-        fd: number,
+        fd: FileHandle,
         buffer: Buffer,
         length: number,
-        position: number,
+        position: Int64,
         cb: (result: number) => void
     ) => void;
     write?: (
         path: string,
-        fd: number,
+        fd: FileHandle,
         buffer: Buffer,
         length: number,
-        position: number,
+        position: Int64,
         cb: (result: number) => void
     ) => void;
     // For every open() call there will be exactly one release() call with the same flags and
     // file handle. It is possible to have a file opened more than once, in which case only the
     // last release will mean, that no more reads/writes will happen on the file. The return
     // value of release is ignored.
-    release?: (path: string, fd: number, cb: (err: number) => void) => void;
-    releasedir?: (path: string, fd: number, cb: (err: number) => void) => void;
+    release?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
+    releasedir?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
     create?: (
         path: string,
         mode: number,
-        cb: (err: number, fd?: number) => void
+        cb: (err: Result, fd?: FileHandle) => void
     ) => void;
-    unlink?: (path: string, cb: (err: number) => void) => void;
-    rename?: (src: string, dest: string, cb: (err: number) => void) => void;
-    link?: (src: string, dest: string, cb: (err: number) => void) => void;
-    symlink?: (src: string, dest: string, cb: (err: number) => void) => void;
-    mkdir?: (path: string, mode: number, cb: (err: number) => void) => void;
-    rmdir?: (path: string, cb: (err: number) => void) => void;
+    unlink?: (path: string, cb: (err: Result) => void) => void;
+    rename?: (src: string, dest: string, cb: (err: Result) => void) => void;
+    link?: (src: string, dest: string, cb: (err: Result) => void) => void;
+    symlink?: (src: string, dest: string, cb: (err: Result) => void) => void;
+    mkdir?: (path: string, mode: number, cb: (err: Result) => void) => void;
+    rmdir?: (path: string, cb: (err: Result) => void) => void;
   }
 
   export interface Timeouts {
-    default?: number;
+    default?: number | false;
     init?: number | false;
     [operation: string]: number | false | undefined;
   }
@@ -149,22 +149,14 @@ declare namespace Fuse {
     remember?: number;
     modules?: string;
     name?: string;
-    mnt?: string;
+    onError?: (error: unknown, operation: string, args: readonly unknown[]) => void;
   }
 }
 
 declare class Fuse {
   constructor(mnt: string, ops?: Fuse.OPERATIONS, opts?: Fuse.OPTIONS);
 
-  // Added by fuse-native
-  static unmount: (mnt: string, cb: (err: null | Error) => void) => any;
-
-  // Added by fuse-native-PLATFORM
-  static beforeMount: (cb: (err: null | Error) => any) => void;
-  static beforeUnmount: (cb: (err: null | Error) => any) => void;
-  static configure: (cb: (err: null | Error) => any) => void;
-  static unconfigure: (cb: (err: null | Error) => any) => void;
-  static isConfigured: (cb: (err: null | Error, result: boolean) => any) => void;
+  static unmount(mnt: string, cb?: (err: null | Error) => void): void;
 
   // Error codes - numeric value retrieved from Fuse instance with errno(code)
   static EPERM: number;
@@ -295,7 +287,7 @@ declare class Fuse {
 
   public opts: Fuse.OPTIONS;
   public mnt: string;
-  public ops?: Fuse.OPERATIONS;
+  public ops: Fuse.OPERATIONS;
   public timeout: number | Fuse.Timeouts;
 
   public mount: (cb: (err: null | Error) => any) => void;
@@ -322,4 +314,4 @@ declare class Fuse {
   public close(allowActive: boolean, cb: (err?: Error) => any): void;
 }
 
-export default Fuse;
+export = Fuse;

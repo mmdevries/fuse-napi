@@ -7,7 +7,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <assert.h>
+#include <errno.h>
+#include <math.h>
+#include <stdbool.h>
+#include <stdatomic.h>
 
 #include <fuse.h>
 #include <fuse_opt.h>
@@ -22,35 +25,66 @@ static int IS_ARRAY_BUFFER_DETACH_SUPPORTED = 0;
 
 napi_status napi_detach_arraybuffer(napi_env env, napi_value buf);
 
+typedef struct fuse_thread_s fuse_thread_t;
+typedef struct fuse_thread_locals_s fuse_thread_locals_t;
+typedef void (*fuse_dispatch_fn)(uv_async_t *, fuse_thread_locals_t *, fuse_thread_t *);
+static void fuse_native_complete_local(fuse_thread_locals_t *l, int32_t result);
+
 #define FUSE_NATIVE_CALLBACK(fn, blk)\
   napi_env env = ft->env;\
   napi_handle_scope scope;\
-  napi_open_handle_scope(env, &scope);\
+  if (napi_open_handle_scope(env, &scope) != napi_ok) {\
+    fuse_native_complete_local(l, -EIO);\
+    return;\
+  }\
   napi_value ctx;\
-  napi_get_reference_value(env, ft->ctx, &ctx);\
   napi_value callback;\
-  napi_get_reference_value(env, fn, &callback);\
+  if (napi_get_reference_value(env, ft->ctx, &ctx) != napi_ok ||\
+      napi_get_reference_value(env, fn, &callback) != napi_ok) {\
+    napi_close_handle_scope(env, scope);\
+    fuse_native_complete_local(l, -EIO);\
+    return;\
+  }\
   blk\
   napi_close_handle_scope(env, scope);
 
 #define FUSE_NATIVE_HANDLER(name, blk)\
   fuse_thread_locals_t *l = get_thread_locals();\
+  if (l == NULL) return -EIO;\
   l->op = op_##name;\
   l->op_fn = fuse_native_dispatch_##name;\
   blk\
-  uv_async_send(&(l->async));\
+  atomic_store(&(l->waiting), 1);\
+  if (uv_async_send(&(l->async)) < 0) {\
+    atomic_store(&(l->waiting), 0);\
+    return -EIO;\
+  }\
   uv_sem_wait(&(l->sem));\
   return l->res;
 
+#define FUSE_CALL_CALLBACK(argc, argv)\
+  napi_status callback_status = napi_make_callback(env, NULL, ctx, callback, argc, argv, NULL);\
+  if (callback_status != napi_ok) {\
+    napi_value callback_exception = NULL;\
+    if (callback_status == napi_pending_exception) {\
+      napi_get_and_clear_last_exception(env, &callback_exception);\
+    }\
+    napi_close_handle_scope(env, scope);\
+    fuse_native_complete_local(l, -EIO);\
+    if (callback_exception != NULL) napi_fatal_exception(env, callback_exception);\
+    return;\
+  }
+
 #define FUSE_METHOD(name, callbackArgs, signalArgs, signature, callBlk, callbackBlk, signalBlk)\
   static void fuse_native_dispatch_##name (uv_async_t* handle, fuse_thread_locals_t* l, fuse_thread_t* ft) {\
+    (void) handle;\
     uint32_t op = op_##name;\
     FUSE_NATIVE_CALLBACK(ft->handlers[op], {\
-      napi_value argv[callbackArgs + 2];\
+      napi_value argv[callbackArgs + 2] = {0};\
       napi_get_reference_value(env, l->self, &(argv[0]));\
       napi_create_uint32(env, l->op, &(argv[1]));\
       callbackBlk\
-      NAPI_MAKE_CALLBACK(env, NULL, ctx, callback, callbackArgs + 2, argv, NULL)\
+      FUSE_CALL_CALLBACK(callbackArgs + 2, argv)\
     })\
   }\
   NAPI_METHOD(fuse_native_signal_##name) {\
@@ -58,8 +92,7 @@ napi_status napi_detach_arraybuffer(napi_env env, napi_value buf);
     NAPI_ARGV_BUFFER_CAST(fuse_thread_locals_t *, l, 0);\
     NAPI_ARGV_INT32(res, 1);\
     signalBlk\
-    l->res = res;\
-    uv_sem_post(&(l->sem));\
+    fuse_native_complete_local(l, res);\
     return NULL;\
   }\
   static int fuse_native_##name signature {\
@@ -70,10 +103,18 @@ napi_status napi_detach_arraybuffer(napi_env env, napi_value buf);
   FUSE_METHOD(name, callbackArgs, signalArgs, signature, callBlk, callbackBlk, {})
 
 #define FUSE_UINT64_TO_INTS_ARGV(n, pos)\
-  uint32_t low##pos = n % 4294967296;\
-  uint32_t high##pos = (n - low##pos) / 4294967296;\
+  uint64_t bits##pos = (uint64_t) (n);\
+  uint32_t low##pos = (uint32_t) (bits##pos & UINT32_MAX);\
+  uint32_t high##pos = (uint32_t) (bits##pos >> 32);\
   napi_create_uint32(env, low##pos, &(argv[pos]));\
   napi_create_uint32(env, high##pos, &(argv[pos + 1]));
+
+#define FUSE_CREATE_UINT64_ARGV(n, pos)\
+  if (create_uint64_value(env, (uint64_t) (n), &(argv[pos])) != napi_ok) {\
+    fuse_native_complete_local(l, -EIO);\
+    napi_close_handle_scope(env, scope);\
+    return;\
+  }
 
 
 // Opcodes
@@ -112,36 +153,52 @@ static const uint32_t op_link = 30;
 static const uint32_t op_symlink = 31;
 static const uint32_t op_mkdir = 32;
 static const uint32_t op_rmdir = 33;
+#define FUSE_OPERATION_COUNT 34
 
 // Data structures
 
-typedef struct {
+struct fuse_thread_s {
   napi_env env;
+  uv_loop_t *loop;
   pthread_t thread;
   pthread_attr_t attr;
   napi_ref ctx;
-  napi_ref malloc;
+  napi_ref state_ref;
+  napi_ref cleanup_cb;
 
   // Operation handlers
-  napi_ref handlers[35];
+  napi_ref handlers[FUSE_OPERATION_COUNT];
 
   struct fuse *fuse;
   struct fuse_chan *ch;
-  char mnt[1024];
-  char mntopts[1024];
+  char *mnt;
+  char *mntopts;
   int mounted;
+  int thread_started;
+  int attr_initialized;
+  int mutex_initialized;
+  int sem_initialized;
+  int async_initialized;
+  atomic_int cleanup_scheduled;
+  int env_cleanup;
+  int cleanup_error;
+  int async_init_status;
+  size_t close_pending;
+  fuse_thread_locals_t *locals;
+  napi_async_cleanup_hook_handle cleanup_hook;
 
   uv_async_t async;
   uv_mutex_t mut;
   uv_sem_t sem;
-} fuse_thread_t;
+  uv_work_t cleanup_work;
+};
 
-typedef struct {
+struct fuse_thread_locals_s {
   napi_ref self;
 
   // Opcode
   uint32_t op;
-  void *op_fn;
+  fuse_dispatch_fn op_fn;
 
   // Payloads
   const char *path;
@@ -152,11 +209,12 @@ typedef struct {
   off_t offset;
   size_t len;
   mode_t mode;
+  int int_value;
   dev_t dev;
   uid_t uid;
   gid_t gid;
-  size_t atime;
-  size_t mtime;
+  int64_t atime;
+  int64_t mtime;
   int32_t res;
 
   // Extended attributes
@@ -178,11 +236,28 @@ typedef struct {
   fuse_thread_t *fuse;
   uv_sem_t sem;
   uv_async_t async;
+  int sem_initialized;
+  int async_initialized;
+  atomic_int waiting;
+  fuse_thread_locals_t *next;
 
-} fuse_thread_locals_t;
+};
+
+static void fuse_native_complete_local (fuse_thread_locals_t *l, int32_t result) {
+  if (atomic_exchange(&(l->waiting), 0) == 1) {
+    l->res = result;
+    uv_sem_post(&(l->sem));
+  }
+}
 
 static pthread_key_t thread_locals_key;
-static fuse_thread_locals_t* get_thread_locals();
+static pthread_once_t thread_locals_once = PTHREAD_ONCE_INIT;
+static int thread_locals_status = 0;
+static fuse_thread_locals_t* get_thread_locals(void);
+
+static void create_thread_locals_key (void) {
+  thread_locals_status = pthread_key_create(&(thread_locals_key), NULL);
+}
 
 // Helpers
 // TODO: Extract into a separate file.
@@ -190,31 +265,72 @@ static fuse_thread_locals_t* get_thread_locals();
 static uint64_t uint32s_to_uint64 (uint32_t **ints) {
   uint64_t low = *((*ints)++);
   uint64_t high = *((*ints)++);
-  return high * 4294967296 + low;
+  return (high << 32) | low;
+}
+
+static int64_t uint32s_to_int64 (uint32_t **ints) {
+  return (int64_t) uint32s_to_uint64(ints);
 }
 
 static void uint32s_to_timespec (struct timespec* ts, uint32_t** ints) {
-  uint64_t ms = uint32s_to_uint64(ints);
-  ts->tv_sec = ms / 1000;
-  ts->tv_nsec = (ms % 1000) * 1000000;
+  int64_t ms = uint32s_to_int64(ints);
+  int64_t seconds = ms / 1000;
+  int64_t remainder = ms % 1000;
+  if (remainder < 0) {
+    seconds--;
+    remainder += 1000;
+  }
+  ts->tv_sec = (time_t) seconds;
+  ts->tv_nsec = (long) (remainder * 1000000);
 }
 
-static uint64_t timespec_to_uint64 (const struct timespec* ts) {
-  uint64_t ms = (ts->tv_sec * 1000) + (ts->tv_nsec / 1000000);
-  return ms;
+static int timespec_to_int64 (const struct timespec* ts, int64_t *result) {
+  int64_t seconds = (int64_t) ts->tv_sec;
+  int64_t milliseconds = (int64_t) ts->tv_nsec / 1000000;
+  if ((time_t) seconds != ts->tv_sec ||
+      seconds > INT64_MAX / 1000 ||
+      seconds < INT64_MIN / 1000) {
+    return -EOVERFLOW;
+  }
+  int64_t base = seconds * 1000;
+  if ((milliseconds > 0 && base > INT64_MAX - milliseconds) ||
+      (milliseconds < 0 && base < INT64_MIN - milliseconds)) {
+    return -EOVERFLOW;
+  }
+  *result = base + milliseconds;
+  return 0;
 }
 
-static void populate_stat (uint32_t *ints, struct stat* stat) {
-  stat->st_mode = *ints++;
+static int populate_stat (uint32_t *ints, struct stat* stat) {
+  memset(stat, 0, sizeof(*stat));
+  uint32_t mode = *ints++;
+  stat->st_mode = (mode_t) mode;
+  if ((uint32_t) stat->st_mode != mode) return -ERANGE;
   stat->st_uid = *ints++;
   stat->st_gid = *ints++;
-  stat->st_size = uint32s_to_uint64(&ints);
-  stat->st_dev = *ints++;
-  stat->st_nlink = *ints++;
-  stat->st_ino = *ints++;
-  stat->st_rdev = *ints++;
-  stat->st_blksize = *ints++;
-  stat->st_blocks = uint32s_to_uint64(&ints);
+  uint64_t size = uint32s_to_uint64(&ints);
+  uint64_t dev = uint32s_to_uint64(&ints);
+  uint64_t nlink = uint32s_to_uint64(&ints);
+  uint64_t ino = uint32s_to_uint64(&ints);
+  uint64_t rdev = uint32s_to_uint64(&ints);
+  uint64_t blksize = uint32s_to_uint64(&ints);
+  uint64_t blocks = uint32s_to_uint64(&ints);
+  stat->st_size = (off_t) size;
+  stat->st_dev = (dev_t) dev;
+  stat->st_nlink = (nlink_t) nlink;
+  stat->st_ino = (ino_t) ino;
+  stat->st_rdev = (dev_t) rdev;
+  stat->st_blksize = (blksize_t) blksize;
+  stat->st_blocks = (blkcnt_t) blocks;
+  if (stat->st_size < 0 || (uint64_t) stat->st_size != size ||
+      (uint64_t) stat->st_dev != dev ||
+      (uint64_t) stat->st_nlink != nlink ||
+      (uint64_t) stat->st_ino != ino ||
+      (uint64_t) stat->st_rdev != rdev ||
+      stat->st_blksize < 0 || (uint64_t) stat->st_blksize != blksize ||
+      stat->st_blocks < 0 || (uint64_t) stat->st_blocks != blocks) {
+    return -ERANGE;
+  }
 #ifdef __APPLE__
   uint32s_to_timespec(&stat->st_atimespec, &ints);
   uint32s_to_timespec(&stat->st_mtimespec, &ints);
@@ -224,20 +340,97 @@ static void populate_stat (uint32_t *ints, struct stat* stat) {
   uint32s_to_timespec(&stat->st_mtim, &ints);
   uint32s_to_timespec(&stat->st_ctim, &ints);
 #endif
+  return 0;
 }
 
-static void populate_statvfs (uint32_t *ints, struct statvfs* statvfs) {
-  statvfs->f_bsize = *ints++;
-  statvfs->f_frsize = *ints++;
-  statvfs->f_blocks = *ints++;
-  statvfs->f_bfree = *ints++;
-  statvfs->f_bavail = *ints++;
-  statvfs->f_files = *ints++;
-  statvfs->f_ffree = *ints++;
-  statvfs->f_favail = *ints++;
-  statvfs->f_fsid = *ints++;
-  statvfs->f_flag = *ints++;
-  statvfs->f_namemax = *ints++;
+static int populate_statvfs (uint32_t *ints, struct statvfs* statvfs) {
+  memset(statvfs, 0, sizeof(*statvfs));
+  uint64_t bsize = uint32s_to_uint64(&ints);
+  uint64_t frsize = uint32s_to_uint64(&ints);
+  uint64_t blocks = uint32s_to_uint64(&ints);
+  uint64_t bfree = uint32s_to_uint64(&ints);
+  uint64_t bavail = uint32s_to_uint64(&ints);
+  uint64_t files = uint32s_to_uint64(&ints);
+  uint64_t ffree = uint32s_to_uint64(&ints);
+  uint64_t favail = uint32s_to_uint64(&ints);
+  uint64_t fsid = uint32s_to_uint64(&ints);
+  uint64_t flag = uint32s_to_uint64(&ints);
+  uint64_t namemax = uint32s_to_uint64(&ints);
+  statvfs->f_bsize = (unsigned long) bsize;
+  statvfs->f_frsize = (unsigned long) frsize;
+  statvfs->f_blocks = (fsblkcnt_t) blocks;
+  statvfs->f_bfree = (fsblkcnt_t) bfree;
+  statvfs->f_bavail = (fsblkcnt_t) bavail;
+  statvfs->f_files = (fsfilcnt_t) files;
+  statvfs->f_ffree = (fsfilcnt_t) ffree;
+  statvfs->f_favail = (fsfilcnt_t) favail;
+  statvfs->f_fsid = (unsigned long) fsid;
+  statvfs->f_flag = (unsigned long) flag;
+  statvfs->f_namemax = (unsigned long) namemax;
+  if ((uint64_t) statvfs->f_bsize != bsize ||
+      (uint64_t) statvfs->f_frsize != frsize ||
+      (uint64_t) statvfs->f_blocks != blocks ||
+      (uint64_t) statvfs->f_bfree != bfree ||
+      (uint64_t) statvfs->f_bavail != bavail ||
+      (uint64_t) statvfs->f_files != files ||
+      (uint64_t) statvfs->f_ffree != ffree ||
+      (uint64_t) statvfs->f_favail != favail ||
+      (uint64_t) statvfs->f_fsid != fsid ||
+      (uint64_t) statvfs->f_flag != flag ||
+      (uint64_t) statvfs->f_namemax != namemax) {
+    return -ERANGE;
+  }
+  return 0;
+}
+
+static napi_status create_uint64_value (napi_env env, uint64_t value, napi_value *result) {
+  if (value <= 9007199254740991ULL) {
+    return napi_create_double(env, (double) value, result);
+  }
+  return napi_create_bigint_uint64(env, value, result);
+}
+
+static int value_to_uint64 (napi_env env, napi_value value, uint64_t *result) {
+  napi_valuetype type;
+  if (napi_typeof(env, value, &type) != napi_ok) return -1;
+
+  if (type == napi_bigint) {
+    bool lossless = false;
+    if (napi_get_value_bigint_uint64(env, value, result, &lossless) != napi_ok || !lossless) return -1;
+    return 0;
+  }
+
+  if (type == napi_number) {
+    double number;
+    if (napi_get_value_double(env, value, &number) != napi_ok) return -1;
+    if (!isfinite(number) || number < 0 || number > 9007199254740991.0 || floor(number) != number) return -1;
+    *result = (uint64_t) number;
+    return 0;
+  }
+
+  return -1;
+}
+
+static int get_uint32_array (napi_env env, napi_value value, uint32_t **data, size_t *length) {
+  bool is_typedarray = false;
+  napi_typedarray_type type;
+  size_t elements = 0;
+  napi_value arraybuffer;
+  size_t byte_offset = 0;
+  void *raw_data = NULL;
+
+  if (napi_is_typedarray(env, value, &is_typedarray) != napi_ok || !is_typedarray) return -1;
+  if (napi_get_typedarray_info(
+        env, value, &type, &elements, &raw_data, &arraybuffer, &byte_offset
+      ) != napi_ok ||
+      type != napi_uint32_array ||
+      byte_offset % sizeof(uint32_t) != 0) {
+    return -1;
+  }
+
+  *data = (uint32_t *) raw_data;
+  *length = elements;
+  return 0;
 }
 
 // Methods
@@ -248,8 +441,13 @@ FUSE_METHOD(statfs, 1, 1, (const char * path, struct statvfs *statvfs), {
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
 }, {
-  NAPI_ARGV_BUFFER_CAST(uint32_t*, ints, 2)
-  populate_statvfs(ints, l->statvfs);
+  uint32_t *ints = NULL;
+  size_t ints_length = 0;
+  if (res == 0 && (get_uint32_array(env, argv[2], &ints, &ints_length) != 0 || ints_length != 22)) {
+    res = -EIO;
+  } else if (res == 0) {
+    res = populate_statvfs(ints, l->statvfs);
+  }
 })
 
 FUSE_METHOD(getattr, 1, 1, (const char *path, struct stat *stat), {
@@ -258,8 +456,13 @@ FUSE_METHOD(getattr, 1, 1, (const char *path, struct stat *stat), {
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
 }, {
-  NAPI_ARGV_BUFFER_CAST(uint32_t*, ints, 2)
-  populate_stat(ints, l->stat);
+  uint32_t *ints = NULL;
+  size_t ints_length = 0;
+  if (res == 0 && (get_uint32_array(env, argv[2], &ints, &ints_length) != 0 || ints_length != 23)) {
+    res = -EIO;
+  } else if (res == 0) {
+    res = populate_stat(ints, l->stat);
+  }
 })
 
 FUSE_METHOD(fgetattr, 2, 1, (const char *path, struct stat *stat, struct fuse_file_info *info), {
@@ -269,21 +472,26 @@ FUSE_METHOD(fgetattr, 2, 1, (const char *path, struct stat *stat, struct fuse_fi
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->fh, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(l->info->fh, 3)
   } else {
-    napi_create_uint32(env, 0, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(0, 3)
   }
 }, {
-  NAPI_ARGV_BUFFER_CAST(uint32_t*, ints, 2)
-  populate_stat(ints, l->stat);
+  uint32_t *ints = NULL;
+  size_t ints_length = 0;
+  if (res == 0 && (get_uint32_array(env, argv[2], &ints, &ints_length) != 0 || ints_length != 23)) {
+    res = -EIO;
+  } else if (res == 0) {
+    res = populate_stat(ints, l->stat);
+  }
 })
 
 FUSE_METHOD_VOID(access, 2, 0, (const char *path, int mode), {
   l->path = path;
-  l->mode = mode;
+  l->int_value = mode;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
-  napi_create_uint32(env, l->mode, &(argv[3]));
+  napi_create_int32(env, l->int_value, &(argv[3]));
 })
 
 FUSE_METHOD(open, 2, 1, (const char *path, struct fuse_file_info *info), {
@@ -292,32 +500,32 @@ FUSE_METHOD(open, 2, 1, (const char *path, struct fuse_file_info *info), {
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->flags, &(argv[3]));
+    napi_create_int32(env, l->info->flags, &(argv[3]));
   } else {
     napi_create_uint32(env, 0, &(argv[3]));
   }
 }, {
-  NAPI_ARGV_INT32(fd, 2)
-  if (fd != 0) {
+  uint64_t fd = 0;
+  if (res == 0 && value_to_uint64(env, argv[2], &fd) != 0) res = -EINVAL;
+  if (res == 0 && l->info != NULL) {
     l->info->fh = fd;
   }
 })
 
-FUSE_METHOD(opendir, 3, 1, (const char *path, struct fuse_file_info *info), {
+FUSE_METHOD(opendir, 2, 1, (const char *path, struct fuse_file_info *info), {
   l->path = path;
   l->info = info;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->fh, &(argv[3]));
-    napi_create_uint32(env, l->info->flags, &(argv[4]));
+    napi_create_int32(env, l->info->flags, &(argv[3]));
   } else {
     napi_create_uint32(env, 0, &(argv[3]));
-    napi_create_uint32(env, 0, &(argv[4]));
   }
 }, {
-  NAPI_ARGV_INT32(fd, 2)
-  if (fd != 0) {
+  uint64_t fd = 0;
+  if (res == 0 && value_to_uint64(env, argv[2], &fd) != 0) res = -EINVAL;
+  if (res == 0 && l->info != NULL) {
     l->info->fh = fd;
   }
 })
@@ -330,16 +538,19 @@ FUSE_METHOD(create, 2, 1, (const char *path, mode_t mode, struct fuse_file_info 
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   napi_create_uint32(env, l->mode, &(argv[3]));
 }, {
-  NAPI_ARGV_INT32(fd, 2)
-  if (fd != 0) {
+  uint64_t fd = 0;
+  if (res == 0 && value_to_uint64(env, argv[2], &fd) != 0) res = -EINVAL;
+  if (res == 0 && l->info != NULL) {
     l->info->fh = fd;
   }
 })
 
 FUSE_METHOD_VOID(utimens, 5, 0, (const char *path, const struct timespec tv[2]), {
   l->path = path;
-  l->atime = timespec_to_uint64(&tv[0]);
-  l->mtime = timespec_to_uint64(&tv[1]);
+  if (timespec_to_int64(&tv[0], &(l->atime)) != 0 ||
+      timespec_to_int64(&tv[1], &(l->mtime)) != 0) {
+    return -EOVERFLOW;
+  }
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   FUSE_UINT64_TO_INTS_ARGV(l->atime, 3)
@@ -352,9 +563,9 @@ FUSE_METHOD_VOID(release, 2, 0, (const char *path, struct fuse_file_info *info),
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->fh, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(l->info->fh, 3)
   } else {
-    napi_create_uint32(env, 0, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(0, 3)
   }
 })
 
@@ -364,13 +575,14 @@ FUSE_METHOD_VOID(releasedir, 2, 0, (const char *path, struct fuse_file_info *inf
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->fh, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(l->info->fh, 3)
   } else {
-    napi_create_uint32(env, 0, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(0, 3)
   }
 })
 
 FUSE_METHOD(read, 6, 2, (const char *path, char *buf, size_t len, off_t offset, struct fuse_file_info *info), {
+  if (len > UINT32_MAX) return -EOVERFLOW;
   l->path = path;
   l->buf = buf;
   l->len = len;
@@ -378,15 +590,17 @@ FUSE_METHOD(read, 6, 2, (const char *path, char *buf, size_t len, off_t offset, 
   l->info = info;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
-  napi_create_uint32(env, l->info->fh, &(argv[3]));
+  FUSE_CREATE_UINT64_ARGV(l->info->fh, 3)
   napi_create_external_buffer(env, l->len, (char *) l->buf, NULL, NULL, &(argv[4]));
-  napi_create_uint32(env, l->len, &(argv[5]));
+  napi_create_uint32(env, (uint32_t) l->len, &(argv[5]));
   FUSE_UINT64_TO_INTS_ARGV(l->offset, 6)
 }, {
-  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1) assert(napi_detach_arraybuffer(env, argv[3]) == napi_ok);
+  if (res > 0 && (size_t) res > l->len) res = -EIO;
+  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1 && napi_detach_arraybuffer(env, argv[3]) != napi_ok) res = -EIO;
 })
 
 FUSE_METHOD(write, 6, 2, (const char *path, const char *buf, size_t len, off_t offset, struct fuse_file_info *info), {
+  if (len > UINT32_MAX) return -EOVERFLOW;
   l->path = path;
   l->buf = buf;
   l->len = len;
@@ -394,12 +608,13 @@ FUSE_METHOD(write, 6, 2, (const char *path, const char *buf, size_t len, off_t o
   l->info = info;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
-  napi_create_uint32(env, l->info->fh, &(argv[3]));
+  FUSE_CREATE_UINT64_ARGV(l->info->fh, 3)
   napi_create_external_buffer(env, l->len, (char *) l->buf, NULL, NULL, &(argv[4]));
-  napi_create_uint32(env, l->len, &(argv[5]));
+  napi_create_uint32(env, (uint32_t) l->len, &(argv[5]));
   FUSE_UINT64_TO_INTS_ARGV(l->offset, 6)
 }, {
-  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1) assert(napi_detach_arraybuffer(env, argv[3]) == napi_ok);
+  if (res > 0 && (size_t) res > l->len) res = -EIO;
+  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1 && napi_detach_arraybuffer(env, argv[3]) != napi_ok) res = -EIO;
 })
 
 FUSE_METHOD(readdir, 1, 2, (const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *info), {
@@ -411,39 +626,55 @@ FUSE_METHOD(readdir, 1, 2, (const char *path, void *buf, fuse_fill_dir_t filler,
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
 }, {
-  uint32_t stats_length;
-  uint32_t names_length;
-  napi_get_array_length(env, argv[3], &stats_length);
-  napi_get_array_length(env, argv[2], &names_length);
+  bool names_is_array = false;
+  bool stats_is_array = false;
+  uint32_t names_length = 0;
+  uint32_t stats_length = 0;
 
-  napi_value raw_names = argv[2];
-  napi_value raw_stats = argv[3];
+  if (res == 0 &&
+      (napi_is_array(env, argv[2], &names_is_array) != napi_ok ||
+       napi_is_array(env, argv[3], &stats_is_array) != napi_ok ||
+       !names_is_array ||
+       !stats_is_array ||
+       napi_get_array_length(env, argv[2], &names_length) != napi_ok ||
+       napi_get_array_length(env, argv[3], &stats_length) != napi_ok ||
+       (stats_length != 0 && stats_length != names_length))) {
+    res = -EIO;
+  }
 
-  if (names_length != stats_length) {
-    NAPI_FOR_EACH(raw_names, raw_name) {
-      NAPI_UTF8(name, 1024, raw_name)
-      int err = l->readdir_filler((char *) l->buf, name, NULL, 0);
-      if (err == 1) {
-        break;
-      }
+  for (uint32_t i = 0; res == 0 && i < names_length; i++) {
+    napi_value raw_name;
+    size_t name_length = 0;
+    char name[256];
+    if (napi_get_element(env, argv[2], i, &raw_name) != napi_ok ||
+        napi_get_value_string_utf8(env, raw_name, NULL, 0, &name_length) != napi_ok ||
+        name_length > 255 ||
+        napi_get_value_string_utf8(env, raw_name, name, sizeof(name), &name_length) != napi_ok) {
+      res = -EIO;
+      break;
     }
-  } else {
-    NAPI_FOR_EACH(raw_names, raw_name) {
-      NAPI_UTF8(name, 1024, raw_name)
+
+    struct stat st = {0};
+    struct stat *stat_ptr = NULL;
+    if (stats_length != 0) {
       napi_value raw_stat;
-      napi_get_element(env, raw_stats, i, &raw_stat);
-
-      NAPI_BUFFER_CAST(uint32_t*, stats_array, raw_stat);
-      struct stat st;
-      populate_stat(stats_array, &st);
-
-      // TODO: It turns out readdirplus likely won't work with FUSE 29...
-      // Metadata caching between readdir/getattr will be enabled when we upgrade fuse-shared-library
-      int err = l->readdir_filler((char *) l->buf, name, (struct stat *) &st, 0);
-      if (err == 1) {
+      uint32_t *stats_array = NULL;
+      size_t stats_array_length = 0;
+      if (napi_get_element(env, argv[3], i, &raw_stat) != napi_ok ||
+          get_uint32_array(env, raw_stat, &stats_array, &stats_array_length) != 0 ||
+          stats_array_length != 23) {
+        res = -EIO;
         break;
       }
+      int stat_result = populate_stat(stats_array, &st);
+      if (stat_result != 0) {
+        res = stat_result;
+        break;
+      }
+      stat_ptr = &st;
     }
+
+    if (l->readdir_filler((char *) l->buf, name, stat_ptr, 0) != 0) break;
   }
 })
 
@@ -461,9 +692,10 @@ FUSE_METHOD(setxattr, 5, 1, (const char *path, const char *name, const char *val
   napi_create_string_utf8(env, l->name, NAPI_AUTO_LENGTH, &(argv[3]));
   napi_create_external_buffer(env, l->size, (char *) l->value, NULL, NULL, &(argv[4]));
   napi_create_uint32(env, l->position, &(argv[5]));
-  napi_create_uint32(env, l->flags, &(argv[6]));
+  napi_create_int32(env, l->flags, &(argv[6]));
 }, {
-  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1) assert(napi_detach_arraybuffer(env, argv[2]) == napi_ok);
+  if (res > 0) res = -EIO;
+  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1 && napi_detach_arraybuffer(env, argv[2]) != napi_ok) res = -EIO;
 })
 
 FUSE_METHOD(getxattr, 4, 1, (const char *path, const char *name, char *value, size_t size, uint32_t position), {
@@ -478,7 +710,8 @@ FUSE_METHOD(getxattr, 4, 1, (const char *path, const char *name, char *value, si
   napi_create_external_buffer(env, l->size, (char *) l->value, NULL, NULL, &(argv[4]));
   napi_create_uint32(env, l->position, &(argv[5]));
 }, {
-  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1) assert(napi_detach_arraybuffer(env, argv[2]) == napi_ok);
+  if (l->size > 0 && res > 0 && (size_t) res > l->size) res = -ERANGE;
+  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1 && napi_detach_arraybuffer(env, argv[2]) != napi_ok) res = -EIO;
 })
 
 #else
@@ -494,9 +727,10 @@ FUSE_METHOD(setxattr, 5, 1, (const char *path, const char *name, const char *val
   napi_create_string_utf8(env, l->name, NAPI_AUTO_LENGTH, &(argv[3]));
   napi_create_external_buffer(env, l->size, (char *) l->value, NULL, NULL, &(argv[4]));
   napi_create_uint32(env, 0, &(argv[5])); // normalize apis between mac and linux
-  napi_create_uint32(env, l->flags, &(argv[6]));
+  napi_create_int32(env, l->flags, &(argv[6]));
 }, {
-  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1) assert(napi_detach_arraybuffer(env, argv[2]) == napi_ok);
+  if (res > 0) res = -EIO;
+  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1 && napi_detach_arraybuffer(env, argv[2]) != napi_ok) res = -EIO;
 })
 
 FUSE_METHOD(getxattr, 4, 1, (const char *path, const char *name, char *value, size_t size), {
@@ -510,7 +744,8 @@ FUSE_METHOD(getxattr, 4, 1, (const char *path, const char *name, char *value, si
   napi_create_external_buffer(env, l->size, (char *) l->value, NULL, NULL, &(argv[4]));
   napi_create_uint32(env, 0, &(argv[5]));
 }, {
-  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1) assert(napi_detach_arraybuffer(env, argv[2]) == napi_ok);
+  if (l->size > 0 && res > 0 && (size_t) res > l->size) res = -ERANGE;
+  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1 && napi_detach_arraybuffer(env, argv[2]) != napi_ok) res = -EIO;
 })
 
 #endif
@@ -523,7 +758,8 @@ FUSE_METHOD(listxattr, 2, 1, (const char *path, char *list, size_t size), {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   napi_create_external_buffer(env, l->size, l->list, NULL, NULL, &(argv[3]));
 }, {
-  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1) assert(napi_detach_arraybuffer(env, argv[2]) == napi_ok);
+  if (l->size > 0 && res > 0 && (size_t) res > l->size) res = -ERANGE;
+  if (IS_ARRAY_BUFFER_DETACH_SUPPORTED == 1 && napi_detach_arraybuffer(env, argv[2]) != napi_ok) res = -EIO;
 })
 
 FUSE_METHOD_VOID(removexattr, 2, 0, (const char *path, const char *name), {
@@ -540,37 +776,37 @@ FUSE_METHOD_VOID(flush, 2, 0, (const char *path, struct fuse_file_info *info), {
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->fh, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(l->info->fh, 3)
   } else {
-    napi_create_uint32(env, 0, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(0, 3)
   }
 })
 
 FUSE_METHOD_VOID(fsync, 3, 0, (const char *path, int datasync, struct fuse_file_info *info), {
   l->path = path;
-  l->mode = datasync;
+  l->int_value = datasync;
   l->info = info;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
-  napi_create_uint32(env, l->mode, &(argv[3]));
+  napi_create_int32(env, l->int_value, &(argv[3]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->fh, &(argv[4]));
+    FUSE_CREATE_UINT64_ARGV(l->info->fh, 4)
   } else {
-    napi_create_uint32(env, 0, &(argv[4]));
+    FUSE_CREATE_UINT64_ARGV(0, 4)
   }
 })
 
 FUSE_METHOD_VOID(fsyncdir, 3, 0, (const char *path, int datasync, struct fuse_file_info *info), {
   l->path = path;
-  l->mode = datasync;
+  l->int_value = datasync;
   l->info = info;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
-  napi_create_uint32(env, l->mode, &(argv[3]));
+  napi_create_int32(env, l->int_value, &(argv[3]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->fh, &(argv[4]));
+    FUSE_CREATE_UINT64_ARGV(l->info->fh, 4)
   } else {
-    napi_create_uint32(env, 0, &(argv[4]));
+    FUSE_CREATE_UINT64_ARGV(0, 4)
   }
 })
 
@@ -590,9 +826,9 @@ FUSE_METHOD_VOID(ftruncate, 4, 0, (const char *path, off_t size, struct fuse_fil
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   if (l->info != NULL) {
-    napi_create_uint32(env, l->info->fh, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(l->info->fh, 3)
   } else {
-    napi_create_uint32(env, 0, &(argv[3]));
+    FUSE_CREATE_UINT64_ARGV(0, 3)
   }
   FUSE_UINT64_TO_INTS_ARGV(l->offset, 4)
 })
@@ -604,8 +840,16 @@ FUSE_METHOD(readlink, 1, 1, (const char *path, char *linkname, size_t len), {
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
 }, {
-  NAPI_ARGV_UTF8(linkname, l->len, 2)
-  strncpy(l->linkname, linkname, l->len);
+  if (res == 0) {
+    size_t linkname_length = 0;
+    if (napi_get_value_string_utf8(env, argv[2], NULL, 0, &linkname_length) != napi_ok ||
+        linkname_length >= l->len ||
+        napi_get_value_string_utf8(
+          env, argv[2], l->linkname, l->len, &linkname_length
+        ) != napi_ok) {
+      res = -ENAMETOOLONG;
+    }
+  }
 })
 
 FUSE_METHOD_VOID(chown, 3, 0, (const char *path, uid_t uid, gid_t gid), {
@@ -633,7 +877,7 @@ FUSE_METHOD_VOID(mknod, 3, 0, (const char *path, mode_t mode, dev_t dev), {
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   napi_create_uint32(env, l->mode, &(argv[3]));
-  napi_create_uint32(env, l->dev, &(argv[4]));
+  FUSE_CREATE_UINT64_ARGV(l->dev, 4)
 })
 
 FUSE_METHOD_VOID(unlink, 1, 0, (const char *path), {
@@ -681,13 +925,14 @@ FUSE_METHOD_VOID(rmdir, 1, 0, (const char *path), {
 })
 
 static void fuse_native_dispatch_init (uv_async_t* handle, fuse_thread_locals_t* l, fuse_thread_t* ft) {\
+  (void) handle;
   FUSE_NATIVE_CALLBACK(ft->handlers[op_init], {
-    napi_value argv[2];
+    napi_value argv[2] = {0};
 
     napi_get_reference_value(env, l->self, &(argv[0]));
     napi_create_uint32(env, l->op, &(argv[1]));
 
-    NAPI_MAKE_CALLBACK(env, NULL, ctx, callback, 2, argv, NULL);
+    FUSE_CALL_CALLBACK(2, argv)
   })
 }
 
@@ -695,21 +940,27 @@ NAPI_METHOD(fuse_native_signal_init) {
   NAPI_ARGV(2)
   NAPI_ARGV_BUFFER_CAST(fuse_thread_locals_t *, l, 0);
   NAPI_ARGV_INT32(res, 1);
-  l->res = res;
-  uv_sem_post(&(l->sem));
+  fuse_native_complete_local(l, res);
   return NULL;
 }
 
 static void * fuse_native_init (struct fuse_conn_info *conn) {
+  (void) conn;
   fuse_thread_locals_t *l = get_thread_locals();
+  fuse_thread_t *ft = (fuse_thread_t *) fuse_get_context()->private_data;
+  if (l == NULL) return ft;
 
   l->op = op_init;
   l->op_fn = fuse_native_dispatch_init;
 
-  uv_async_send(&(l->async));
+  atomic_store(&(l->waiting), 1);
+  if (uv_async_send(&(l->async)) < 0) {
+    atomic_store(&(l->waiting), 0);
+    return ft;
+  }
   uv_sem_wait(&(l->sem));
 
-  return l->fuse;
+  return ft;
 }
 
 // Top-level dispatcher
@@ -717,63 +968,109 @@ static void * fuse_native_init (struct fuse_conn_info *conn) {
 static void fuse_native_dispatch (uv_async_t* handle) {
   fuse_thread_locals_t *l = (fuse_thread_locals_t *) handle->data;
   fuse_thread_t *ft = l->fuse;
-  void (*fn)(uv_async_t *, fuse_thread_locals_t *, fuse_thread_t *) = l->op_fn;
-
-  fn(handle, l, ft);
+  if (atomic_load(&(ft->cleanup_scheduled))) {
+    fuse_native_complete_local(l, -EIO);
+    return;
+  }
+  l->op_fn(handle, l, ft);
 }
 
 static void fuse_native_async_init (uv_async_t* handle) {
   fuse_thread_t *ft = (fuse_thread_t *) handle->data;
-  fuse_thread_locals_t *l;
+  fuse_thread_locals_t *l = calloc(1, sizeof(*l));
+  napi_handle_scope scope;
+  if (napi_open_handle_scope(ft->env, &scope) != napi_ok) {
+    ft->async_init_status = UV_EIO;
+    ft->async.data = NULL;
+    free(l);
+    uv_sem_post(&(ft->sem));
+    return;
+  }
+  ft->async_init_status = UV_ENOMEM;
+  ft->async.data = NULL;
+  if (l == NULL) {
+    napi_close_handle_scope(ft->env, scope);
+    uv_sem_post(&(ft->sem));
+    return;
+  }
 
-  FUSE_NATIVE_CALLBACK(ft->malloc, {
-    napi_value argv[1];
-    napi_create_uint32(ft->env, (uint32_t) sizeof(fuse_thread_locals_t), &(argv[0]));
+  l->fuse = ft;
+  atomic_init(&(l->waiting), 0);
 
-    napi_value buf;
-    NAPI_MAKE_CALLBACK(ft->env, NULL, ctx, callback, 1, argv, &buf);
+  napi_value buf;
+  if (napi_create_external_buffer(ft->env, sizeof(*l), (char *) l, NULL, NULL, &buf) != napi_ok ||
+      napi_create_reference(ft->env, buf, 1, &(l->self)) != napi_ok) {
+    free(l);
+    napi_close_handle_scope(ft->env, scope);
+    uv_sem_post(&(ft->sem));
+    return;
+  }
 
-    size_t l_len;
+  int err = uv_sem_init(&(l->sem), 0);
+  if (err < 0) {
+    napi_delete_reference(ft->env, l->self);
+    free(l);
+    ft->async_init_status = err;
+    napi_close_handle_scope(ft->env, scope);
+    uv_sem_post(&(ft->sem));
+    return;
+  }
+  l->sem_initialized = 1;
 
-    napi_get_buffer_info(env, buf, (void **) &l, &l_len);
-    napi_create_reference(env, buf, 1, &(l->self));
-  })
-
-
-  int err = uv_async_init(uv_default_loop(), &(l->async), (uv_async_cb) fuse_native_dispatch);
-  assert(err >= 0);
-
+  err = uv_async_init(ft->loop, &(l->async), (uv_async_cb) fuse_native_dispatch);
+  if (err < 0) {
+    uv_sem_destroy(&(l->sem));
+    napi_delete_reference(ft->env, l->self);
+    free(l);
+    ft->async_init_status = err;
+    napi_close_handle_scope(ft->env, scope);
+    uv_sem_post(&(ft->sem));
+    return;
+  }
+  l->async_initialized = 1;
   uv_unref((uv_handle_t *) &(l->async));
 
-  uv_sem_init(&(l->sem), 0);
   l->async.data = l;
+  l->next = ft->locals;
+  ft->locals = l;
   ft->async.data = l;
-  l->fuse = ft;
+  ft->async_init_status = 0;
 
+  napi_close_handle_scope(ft->env, scope);
   uv_sem_post(&(ft->sem));
 }
 
-static fuse_thread_locals_t* get_thread_locals () {
+static fuse_thread_locals_t* get_thread_locals (void) {
   struct fuse_context *ctx = fuse_get_context();
+  if (ctx == NULL || ctx->private_data == NULL) return NULL;
   fuse_thread_t *ft = (fuse_thread_t *) ctx->private_data;
 
   void *data = pthread_getspecific(thread_locals_key);
 
-  if (data != NULL) {
+  if (data != NULL && !atomic_load(&(ft->cleanup_scheduled))) {
     return (fuse_thread_locals_t *) data;
   }
+  if (data != NULL) return NULL;
 
-  // Need to lock the mutation of l->async.
   uv_mutex_lock(&(ft->mut));
+  if (atomic_load(&(ft->cleanup_scheduled))) {
+    uv_mutex_unlock(&(ft->mut));
+    return NULL;
+  }
   ft->async.data = ft;
+  ft->async_init_status = UV_EIO;
 
-  // Notify the main thread to uv_async_init l->async.
-  uv_async_send(&(ft->async));
+  if (uv_async_send(&(ft->async)) < 0) {
+    uv_mutex_unlock(&(ft->mut));
+    return NULL;
+  }
   uv_sem_wait(&(ft->sem));
 
-  fuse_thread_locals_t *l = (fuse_thread_locals_t*) ft->async.data;
+  fuse_thread_locals_t *l = ft->async_init_status == 0
+    ? (fuse_thread_locals_t*) ft->async.data
+    : NULL;
 
-  pthread_setspecific(thread_locals_key, (void *) l);
+  if (l != NULL) pthread_setspecific(thread_locals_key, (void *) l);
   uv_mutex_unlock(&(ft->mut));
 
   return l;
@@ -783,35 +1080,348 @@ static void* start_fuse_thread (void *data) {
   fuse_thread_t *ft = (fuse_thread_t *) data;
   fuse_loop_mt(ft->fuse);
 
-  fuse_unmount(ft->mnt, ft->ch);
-  fuse_session_remove_chan(ft->ch);
-  fuse_destroy(ft->fuse);
+  uv_mutex_lock(&(ft->mut));
+  struct fuse *fuse = ft->fuse;
+  struct fuse_chan *ch = ft->ch;
+  ft->fuse = NULL;
+  ft->ch = NULL;
+  uv_mutex_unlock(&(ft->mut));
+
+  if (ch != NULL) fuse_unmount(ft->mnt, ch);
+  if (fuse != NULL && ch != NULL) fuse_session_remove_chan(ch);
+  if (fuse != NULL) fuse_destroy(fuse);
 
   return NULL;
 }
 
+static void fuse_native_delete_references (fuse_thread_t *ft) {
+  if (ft->ctx != NULL) {
+    napi_delete_reference(ft->env, ft->ctx);
+    ft->ctx = NULL;
+  }
+  for (size_t i = 0; i < FUSE_OPERATION_COUNT; i++) {
+    if (ft->handlers[i] != NULL) {
+      napi_delete_reference(ft->env, ft->handlers[i]);
+      ft->handlers[i] = NULL;
+    }
+  }
+}
+
+static void fuse_native_free_strings (fuse_thread_t *ft) {
+  free(ft->mnt);
+  free(ft->mntopts);
+  ft->mnt = NULL;
+  ft->mntopts = NULL;
+}
+
+static void fuse_native_failed_async_closed (uv_handle_t *handle) {
+  fuse_thread_t *ft = (fuse_thread_t *) handle->data;
+  if (ft->state_ref != NULL) {
+    napi_delete_reference(ft->env, ft->state_ref);
+    ft->state_ref = NULL;
+  }
+}
+
+static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
+  if (ft->fuse != NULL || ft->ch != NULL) {
+    if (ft->ch != NULL) fuse_unmount(ft->mnt, ft->ch);
+    if (ft->fuse != NULL && ft->ch != NULL) fuse_session_remove_chan(ft->ch);
+    if (ft->fuse != NULL) fuse_destroy(ft->fuse);
+    ft->fuse = NULL;
+    ft->ch = NULL;
+  }
+  if (ft->async_initialized) {
+    ft->async.data = ft;
+    uv_close((uv_handle_t *) &(ft->async), fuse_native_failed_async_closed);
+    ft->async_initialized = 0;
+  } else if (ft->state_ref != NULL) {
+    napi_delete_reference(ft->env, ft->state_ref);
+    ft->state_ref = NULL;
+  }
+  if (ft->sem_initialized) {
+    uv_sem_destroy(&(ft->sem));
+    ft->sem_initialized = 0;
+  }
+  if (ft->mutex_initialized) {
+    uv_mutex_destroy(&(ft->mut));
+    ft->mutex_initialized = 0;
+  }
+  if (ft->attr_initialized) {
+    pthread_attr_destroy(&(ft->attr));
+    ft->attr_initialized = 0;
+  }
+  if (ft->cleanup_hook != NULL) {
+    napi_remove_async_cleanup_hook(ft->cleanup_hook);
+    ft->cleanup_hook = NULL;
+  }
+  fuse_native_delete_references(ft);
+  fuse_native_free_strings(ft);
+}
+
+static char * fuse_native_string (napi_env env, napi_value value) {
+  size_t size = 0;
+  if (napi_get_value_string_utf8(env, value, NULL, 0, &size) != napi_ok) return NULL;
+  char *string = malloc(size + 1);
+  if (string == NULL) return NULL;
+  size_t written = 0;
+  if (napi_get_value_string_utf8(env, value, string, size + 1, &written) != napi_ok) {
+    free(string);
+    return NULL;
+  }
+  string[written] = '\0';
+  return string;
+}
+
+static void fuse_native_finish_cleanup (fuse_thread_t *ft);
+
+static void fuse_native_local_closed (uv_handle_t *handle) {
+  fuse_thread_locals_t *l = (fuse_thread_locals_t *) handle->data;
+  fuse_thread_t *ft = l->fuse;
+  free(l);
+  if (--ft->close_pending == 0) fuse_native_finish_cleanup(ft);
+}
+
+static void fuse_native_thread_async_closed (uv_handle_t *handle) {
+  fuse_thread_t *ft = (fuse_thread_t *) handle->data;
+  if (--ft->close_pending == 0) fuse_native_finish_cleanup(ft);
+}
+
+static void fuse_native_finish_cleanup (fuse_thread_t *ft) {
+  ft->mounted = 0;
+  ft->thread_started = 0;
+  ft->locals = NULL;
+  fuse_native_free_strings(ft);
+
+  if (ft->cleanup_hook != NULL) {
+    napi_remove_async_cleanup_hook(ft->cleanup_hook);
+    ft->cleanup_hook = NULL;
+  }
+
+  if (ft->env_cleanup) {
+    if (ft->cleanup_cb != NULL) {
+      napi_delete_reference(ft->env, ft->cleanup_cb);
+      ft->cleanup_cb = NULL;
+    }
+    if (ft->state_ref != NULL) {
+      napi_delete_reference(ft->env, ft->state_ref);
+      ft->state_ref = NULL;
+    }
+    return;
+  }
+
+  napi_handle_scope scope;
+  if (napi_open_handle_scope(ft->env, &scope) != napi_ok) {
+    if (ft->cleanup_cb != NULL) {
+      napi_delete_reference(ft->env, ft->cleanup_cb);
+      ft->cleanup_cb = NULL;
+    }
+    if (ft->state_ref != NULL) {
+      napi_delete_reference(ft->env, ft->state_ref);
+      ft->state_ref = NULL;
+    }
+    return;
+  }
+  napi_value callback;
+  napi_value global;
+  napi_value argv[1];
+  napi_get_global(ft->env, &global);
+  napi_get_reference_value(ft->env, ft->cleanup_cb, &callback);
+
+  if (ft->cleanup_error == 0) {
+    napi_get_null(ft->env, &(argv[0]));
+  } else {
+    napi_value message;
+    char text[128];
+    snprintf(text, sizeof(text), "Native FUSE cleanup failed: %s", strerror(ft->cleanup_error));
+    napi_create_string_utf8(ft->env, text, NAPI_AUTO_LENGTH, &message);
+    napi_create_error(ft->env, NULL, message, &(argv[0]));
+  }
+
+  napi_delete_reference(ft->env, ft->cleanup_cb);
+  ft->cleanup_cb = NULL;
+  napi_status call_status = napi_call_function(ft->env, global, callback, 1, argv, NULL);
+  if (call_status == napi_pending_exception) {
+    napi_value exception;
+    napi_get_and_clear_last_exception(ft->env, &exception);
+    napi_fatal_exception(ft->env, exception);
+  }
+  napi_close_handle_scope(ft->env, scope);
+  if (ft->state_ref != NULL) {
+    napi_delete_reference(ft->env, ft->state_ref);
+    ft->state_ref = NULL;
+  }
+}
+
+static void fuse_native_cleanup_work (uv_work_t *request) {
+  fuse_thread_t *ft = (fuse_thread_t *) request->data;
+  if (ft->thread_started) {
+    int err = pthread_join(ft->thread, NULL);
+    if (err != 0) ft->cleanup_error = err;
+  }
+
+  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
+    if (l->sem_initialized) {
+      uv_sem_destroy(&(l->sem));
+      l->sem_initialized = 0;
+    }
+  }
+  if (ft->sem_initialized) {
+    uv_sem_destroy(&(ft->sem));
+    ft->sem_initialized = 0;
+  }
+  if (ft->attr_initialized) {
+    int err = pthread_attr_destroy(&(ft->attr));
+    if (err != 0 && ft->cleanup_error == 0) ft->cleanup_error = err;
+    ft->attr_initialized = 0;
+  }
+  if (ft->mutex_initialized) {
+    uv_mutex_destroy(&(ft->mut));
+    ft->mutex_initialized = 0;
+  }
+}
+
+static void fuse_native_cleanup_after (uv_work_t *request, int status) {
+  fuse_thread_t *ft = (fuse_thread_t *) request->data;
+  if (status < 0 && ft->cleanup_error == 0) ft->cleanup_error = EIO;
+
+  fuse_native_delete_references(ft);
+  ft->close_pending = 0;
+
+  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
+    if (l->self != NULL) {
+      napi_delete_reference(ft->env, l->self);
+      l->self = NULL;
+    }
+    if (l->async_initialized) ft->close_pending++;
+  }
+  if (ft->async_initialized) ft->close_pending++;
+
+  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
+    if (l->async_initialized) {
+      l->async_initialized = 0;
+      uv_close((uv_handle_t *) &(l->async), fuse_native_local_closed);
+    }
+  }
+  if (ft->async_initialized) {
+    ft->async_initialized = 0;
+    ft->async.data = ft;
+    uv_close((uv_handle_t *) &(ft->async), fuse_native_thread_async_closed);
+  }
+
+  if (ft->close_pending == 0) fuse_native_finish_cleanup(ft);
+}
+
+static int fuse_native_begin_cleanup (fuse_thread_t *ft, int env_cleanup) {
+  int expected = 0;
+  if (!atomic_compare_exchange_strong(&(ft->cleanup_scheduled), &expected, 1)) return UV_EALREADY;
+  ft->env_cleanup = env_cleanup;
+  ft->cleanup_error = 0;
+
+  if (ft->mutex_initialized) {
+    uv_mutex_lock(&(ft->mut));
+    if (ft->fuse != NULL) fuse_exit(ft->fuse);
+    uv_mutex_unlock(&(ft->mut));
+  }
+
+  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
+    fuse_native_complete_local(l, -EIO);
+  }
+
+  ft->cleanup_work.data = ft;
+  int err = uv_queue_work(ft->loop, &(ft->cleanup_work), fuse_native_cleanup_work, fuse_native_cleanup_after);
+  if (err < 0) {
+    fuse_native_cleanup_work(&(ft->cleanup_work));
+    fuse_native_cleanup_after(&(ft->cleanup_work), 0);
+    return 0;
+  }
+  return 0;
+}
+
+static void fuse_native_env_cleanup (napi_async_cleanup_hook_handle handle, void *data) {
+  (void) handle;
+  fuse_thread_t *ft = (fuse_thread_t *) data;
+  if (atomic_load(&(ft->cleanup_scheduled))) {
+    ft->env_cleanup = 1;
+    return;
+  }
+  fuse_native_begin_cleanup(ft, 1);
+}
+
 NAPI_METHOD(fuse_native_mount) {
-  NAPI_ARGV(7)
+  NAPI_ARGV(6)
 
-  NAPI_ARGV_UTF8(mnt, 1024, 0);
-  NAPI_ARGV_UTF8(mntopts, 1024, 1);
   NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 2);
-  napi_create_reference(env, argv[3], 1, &(ft->ctx));
-  napi_create_reference(env, argv[4], 1, &(ft->malloc));
-  napi_value handlers = argv[5];
-  NAPI_ARGV_BUFFER_CAST(uint32_t *, implemented, 6)
-
-  for (int i = 0; i < 35; i++) {
-    ft->handlers[i] = NULL;
+  if (ft_len < sizeof(*ft)) {
+    napi_throw_range_error(env, "EINVAL", "Invalid native thread state buffer");
+    return NULL;
   }
-
-  NAPI_FOR_EACH(handlers, handler) {
-    napi_create_reference(env, handler, 1, &ft->handlers[i]);
-  }
-
+  memset(ft, 0, sizeof(*ft));
+  atomic_init(&(ft->cleanup_scheduled), 0);
   ft->env = env;
+  if (napi_create_reference(env, argv[2], 1, &(ft->state_ref)) != napi_ok) {
+    napi_throw_error(env, "EFUSEINIT", "Failed to retain the native thread state");
+    return NULL;
+  }
 
-  struct fuse_operations ops = { };
+  ft->mnt = fuse_native_string(env, argv[0]);
+  ft->mntopts = fuse_native_string(env, argv[1]);
+  if (ft->mnt == NULL || ft->mntopts == NULL) {
+    fuse_native_mount_cleanup(ft);
+    napi_throw_type_error(env, "EINVAL", "Mountpoint and mount options must be strings");
+    return NULL;
+  }
+
+  if (napi_get_uv_event_loop(env, &(ft->loop)) != napi_ok ||
+      napi_create_reference(env, argv[3], 1, &(ft->ctx)) != napi_ok) {
+    fuse_native_mount_cleanup(ft);
+    napi_throw_error(env, "EFUSEINIT", "Failed to initialize the native Node.js context");
+    return NULL;
+  }
+
+  napi_value handlers = argv[4];
+  uint32_t *implemented = NULL;
+  size_t implemented_len = 0;
+  if (get_uint32_array(env, argv[5], &implemented, &implemented_len) != 0 ||
+      implemented_len != FUSE_OPERATION_COUNT) {
+    fuse_native_mount_cleanup(ft);
+    napi_throw_range_error(env, "EINVAL", "Invalid implemented-operation buffer");
+    return NULL;
+  }
+
+  bool handlers_is_array = false;
+  uint32_t handlers_length = 0;
+  if (napi_is_array(env, handlers, &handlers_is_array) != napi_ok ||
+      !handlers_is_array ||
+      napi_get_array_length(env, handlers, &handlers_length) != napi_ok ||
+      handlers_length != FUSE_OPERATION_COUNT) {
+    fuse_native_mount_cleanup(ft);
+    napi_throw_type_error(env, "EINVAL", "Unexpected FUSE operation-handler count");
+    return NULL;
+  }
+
+  for (uint32_t i = 0; i < handlers_length; i++) {
+    napi_value handler;
+    napi_valuetype type;
+    if (napi_get_element(env, handlers, i, &handler) != napi_ok ||
+        napi_typeof(env, handler, &type) != napi_ok) {
+      fuse_native_mount_cleanup(ft);
+      napi_throw_type_error(env, "EINVAL", "Invalid FUSE operation handler");
+      return NULL;
+    }
+    if (type == napi_function) {
+      if (napi_create_reference(env, handler, 1, &ft->handlers[i]) == napi_ok) continue;
+      fuse_native_mount_cleanup(ft);
+      napi_throw_error(env, "EFUSEINIT", "Failed to retain a FUSE operation handler");
+      return NULL;
+    }
+    if (implemented[i]) {
+      fuse_native_mount_cleanup(ft);
+      napi_throw_type_error(env, "EINVAL", "An implemented FUSE operation has no handler");
+      return NULL;
+    }
+  }
+
+  struct fuse_operations ops = {0};
   if (implemented[op_access]) ops.access = fuse_native_access;
   if (implemented[op_truncate]) ops.truncate = fuse_native_truncate;
   if (implemented[op_ftruncate]) ops.ftruncate = fuse_native_ftruncate;
@@ -846,77 +1456,106 @@ NAPI_METHOD(fuse_native_mount) {
   if (implemented[op_rmdir]) ops.rmdir = fuse_native_rmdir;
   if (implemented[op_init]) ops.init = fuse_native_init;
 
-  int _argc = (strcmp(mntopts, "-o") <= 0) ? 1 : 2;
+  int _argc = ft->mntopts[0] == '\0' ? 1 : 2;
   char *_argv[] = {
     (char *) "fuse_bindings_dummy",
-    (char *) mntopts
+    ft->mntopts
   };
 
   struct fuse_args args = FUSE_ARGS_INIT(_argc, _argv);
-  struct fuse_chan *ch = fuse_mount(mnt, &args);
-
-  if (ch == NULL) {
-    napi_throw_error(env, "fuse failed", "fuse failed");
+  ft->ch = fuse_mount(ft->mnt, &args);
+  if (ft->ch == NULL) {
+    fuse_opt_free_args(&args);
+    fuse_native_mount_cleanup(ft);
+    napi_throw_error(env, "EFUSEMOUNT", "libfuse failed to mount the requested mountpoint");
     return NULL;
   }
 
-  struct fuse *fuse = fuse_new(ch, &args, &ops, sizeof(struct fuse_operations), ft);
-
-  uv_mutex_init(&(ft->mut));
-  uv_sem_init(&(ft->sem), 0);
-
-  strncpy(ft->mnt, mnt, 1024);
-  strncpy(ft->mntopts, mntopts, 1024);
-  ft->fuse = fuse;
-  ft->ch = ch;
-  ft->mounted++;
-
-  int err = uv_async_init(uv_default_loop(), &(ft->async), (uv_async_cb) fuse_native_async_init);
-
-  if (fuse == NULL || err < 0) {
-    napi_throw_error(env, "fuse failed", "fuse failed");
+  ft->fuse = fuse_new(ft->ch, &args, &ops, sizeof(ops), ft);
+  fuse_opt_free_args(&args);
+  if (ft->fuse == NULL) {
+    fuse_native_mount_cleanup(ft);
+    napi_throw_error(env, "EFUSEINIT", "libfuse failed to initialize the mounted filesystem");
     return NULL;
   }
 
-  pthread_attr_init(&(ft->attr));
-  pthread_create(&(ft->thread), &(ft->attr), start_fuse_thread, ft);
+  int err = uv_mutex_init(&(ft->mut));
+  if (err < 0) goto mount_failed;
+  ft->mutex_initialized = 1;
 
+  err = uv_sem_init(&(ft->sem), 0);
+  if (err < 0) goto mount_failed;
+  ft->sem_initialized = 1;
+
+  err = uv_async_init(ft->loop, &(ft->async), (uv_async_cb) fuse_native_async_init);
+  if (err < 0) goto mount_failed;
+  ft->async_initialized = 1;
+  ft->async.data = ft;
+  uv_unref((uv_handle_t *) &(ft->async));
+
+  err = pthread_attr_init(&(ft->attr));
+  if (err != 0) goto mount_failed;
+  ft->attr_initialized = 1;
+
+  if (napi_add_async_cleanup_hook(env, fuse_native_env_cleanup, ft, &(ft->cleanup_hook)) != napi_ok) {
+    err = UV_EINVAL;
+    goto mount_failed;
+  }
+
+  err = pthread_create(&(ft->thread), &(ft->attr), start_fuse_thread, ft);
+  if (err != 0) goto mount_failed;
+  ft->thread_started = 1;
+  ft->mounted = 1;
+
+  return NULL;
+
+mount_failed:
+  fuse_native_mount_cleanup(ft);
+  napi_throw_error(env, "EFUSEINIT", err < 0 ? uv_strerror(err) : strerror(err));
   return NULL;
 }
 
 NAPI_METHOD(fuse_native_unmount) {
   NAPI_ARGV(2)
-  NAPI_ARGV_UTF8(mnt, 1024, 0);
-  NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 1);
-
-  if (ft != NULL && ft->mounted) {
-    // TODO: Investigate why the FUSE thread is not always killed after fusermount.
-    // pthread_join(ft->thread, NULL);
+  NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 0);
+  if (ft_len < sizeof(*ft) || !ft->mounted) {
+    napi_throw_error(env, "EINVAL", "FUSE filesystem is not mounted");
+    return NULL;
   }
 
-  // TODO: fix the async holding the loop
-  uv_unref((uv_handle_t *) &(ft->async));
-  ft->mounted--;
+  if (napi_create_reference(env, argv[1], 1, &(ft->cleanup_cb)) != napi_ok) {
+    napi_throw_error(env, "EFUSECLEANUP", "Failed to retain the unmount callback");
+    return NULL;
+  }
+
+  int err = fuse_native_begin_cleanup(ft, 0);
+  if (err < 0) {
+    napi_delete_reference(env, ft->cleanup_cb);
+    ft->cleanup_cb = NULL;
+    atomic_store(&(ft->cleanup_scheduled), 0);
+    napi_throw_error(env, "EFUSECLEANUP", uv_strerror(err));
+    return NULL;
+  }
 
   return NULL;
 }
 
 NAPI_INIT() {
-  const napi_node_version* version;
-  assert(napi_get_node_version(env, &version) == napi_ok);
+  uint32_t napi_version = 0;
+  NAPI_STATUS_THROWS_VOID(napi_get_version(env, &napi_version))
+  IS_ARRAY_BUFFER_DETACH_SUPPORTED = napi_version >= 7;
 
-  if (version->major > 12 || (version->major == 12 && version->minor >= 16)) {
-    IS_ARRAY_BUFFER_DETACH_SUPPORTED = 1;
+  if (pthread_once(&(thread_locals_once), create_thread_locals_key) != 0 ||
+      thread_locals_status != 0) {
+    napi_throw_error(env, "EFUSEINIT", "Failed to create FUSE thread-local storage");
+    return;
   }
-
-  pthread_key_create(&(thread_locals_key), NULL); // TODO: add destructor
 
   NAPI_EXPORT_SIZEOF(fuse_thread_t)
 
   NAPI_EXPORT_FUNCTION(fuse_native_mount)
   NAPI_EXPORT_FUNCTION(fuse_native_unmount)
 
-  NAPI_EXPORT_FUNCTION(fuse_native_signal_getattr)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_init)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_access)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_statfs)
@@ -951,7 +1590,6 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(fuse_native_signal_mkdir)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_rmdir)
 
-  NAPI_EXPORT_UINT32(op_getattr)
   NAPI_EXPORT_UINT32(op_init)
   NAPI_EXPORT_UINT32(op_error)
   NAPI_EXPORT_UINT32(op_access)
