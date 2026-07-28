@@ -141,6 +141,7 @@ class Fuse extends Nanoresource {
     this._force = !!opts.force
     this._mkdir = !!opts.mkdir
     this._thread = null
+    this._mountpointDev = null
     this._handlers = this._makeHandlerArray()
     this._threads = new Set()
 
@@ -331,6 +332,7 @@ class Fuse extends Nanoresource {
       function onexists (stat) {
         fs.stat(path.join(self.mnt, '..'), (_, parent) => {
           if (parent && parent.dev !== stat.dev) return cb(new Error('Mountpoint in use'))
+          self._mountpointDev = stat.dev
           try {
             // TODO: asyncify
             binding.fuse_native_mount(self.mnt, opts, self._thread, self, self._malloc, self._handlers, implemented)
@@ -366,17 +368,54 @@ class Fuse extends Nanoresource {
   // Handlers
 
   _op_init (signal) {
-    if (this._openCallback) {
-      process.nextTick(this._openCallback, null)
-      this._openCallback = null
-    }
     if (!this.ops.init) {
+      if (!IS_OSX) this._completeOpen(null)
       signal(0)
+      if (IS_OSX) this._waitForMount()
       return
     }
     this.ops.init(err => {
-      return signal(err)
+      if (!IS_OSX) this._completeOpen(null)
+      signal(err)
+      if (IS_OSX) this._waitForMount()
     })
+  }
+
+  _completeOpen (err) {
+    if (!this._openCallback) return
+    const cb = this._openCallback
+    this._openCallback = null
+    process.nextTick(cb, err)
+  }
+
+  _waitForMount () {
+    const self = this
+    const timeout = mountTimeout(this.timeout)
+    const started = Date.now()
+
+    check()
+
+    function check () {
+      fs.stat(self.mnt, (err, stat) => {
+        if (!err && stat.dev !== self._mountpointDev) {
+          self._completeOpen(null)
+          return
+        }
+
+        if (timeout && Date.now() - started >= timeout) {
+          const mountError = new Error(
+            `Timed out waiting for macFUSE to mount ${JSON.stringify(self.mnt)}. ` +
+            'Ensure macFUSE is installed and enabled in Privacy & Security, ' +
+            'then restart macOS if requested. See https://macfuse.github.io/.'
+          )
+          mountError.code = 'EMACFUSEMOUNT'
+          self._completeOpen(mountError)
+          return
+        }
+
+        setTimeout(check, 10)
+      })
+    }
   }
 
   _op_error (signal) {
@@ -771,6 +810,12 @@ Fuse.ENOMEDIUM = -123
 Fuse.EMEDIUMTYPE = -124
 
 module.exports = Fuse
+
+function mountTimeout (timeout) {
+  if (typeof timeout !== 'object' || !timeout) return timeout
+  if (timeout.init === false) return 0
+  return timeout.init || timeout.default || DEFAULT_TIMEOUT
+}
 
 function getStatfsArray (statfs) {
   const ints = new Uint32Array(11)
