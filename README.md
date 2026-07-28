@@ -1,29 +1,37 @@
-# fuse-native
+# fuse-napi
 
-FUSE bindings for Node JS.
+N-API bindings for [FUSE](https://github.com/libfuse/libfuse) on Linux.
 
-This is a fork of https://www.npmjs.com/package/fuse-native that does
-NOT ship libfuse, and instead depends on it being installed on the user's
-computer. It also only supports Linux.
+> [!NOTE]
+> Development has just started. This package is not yet published to npm.
 
-URL: https://github.com/sagemathinc/fuse-native
+This project starts from the exact published source of
+[`@cocalc/fuse-native@2.4.3`](https://www.npmjs.com/package/@cocalc/fuse-native/v/2.4.3).
+It dynamically links the system `libfuse` instead of shipping a bundled copy.
+See [UPSTREAM.md](./UPSTREAM.md) for reproducible provenance.
 
-Upstream: [https://github.com/fuse\-friends/fuse\-native](https://github.com/fuse-friends/fuse-native), but upstream is [no longer maintained](https://github.com/fuse-friends/fuse-native/issues/36).  However, [this fork](https://github.com/zkochan/fuse-native) might be the most maintained?
+## Requirements
 
-### TESTING
+- Linux
+- Node.js and a C/C++ build toolchain
+- `pkg-config`
+- the libfuse 2 development headers
+
+On Debian or Ubuntu:
 
 ```sh
-pnpm test
+sudo apt-get install build-essential libfuse-dev pkg-config
 ```
 
-- On ARM64 linux, at least, 3 of the tests fail.
-- On x86\-64 linux, all the tests pass
+## Development
 
-### Other Notes
+```sh
+npm install
+npm test
+```
 
-- Upstream seems dead \-\- [https://github.com/fuse\-friends/fuse\-native/issues/36](https://github.com/fuse-friends/fuse-native/issues/36) 
-- On ARM64 linux upstream doesn't install, due to the shared library binary that they ship, which is wrong.  That's the reason I removed all use of shipping shared libraries in an npm module, which is really the wrong way to do things, obviously.
-- I added the `nonEmpty` option, which wasn't in upstream.
+The inherited test suite passes on x86-64 Linux. At least three inherited
+tests were reported to fail on ARM64 Linux.
 
 ## API
 
@@ -64,7 +72,8 @@ Create a new `Fuse` object.
   mkdir: false   // Create the mountpoint before mounting.
 ```
 
-I'm making extensive use of these bindings in [WebSocketFS](https://github.com/sagemathinc/websocketfs/blob/main/lib/fuse/sftp-fuse.ts), which is _**like sshfs, but over a WebSocket and implemented in Typescript.**_ Look at code here: https://github.com/sagemathinc/websocketfs/tree/main/lib/fuse 
+For a larger usage example, see CoCalc's
+[WebSocketFS FUSE integration](https://github.com/sagemathinc/websocketfs/tree/main/lib/fuse).
 
 ### FUSE API
 
@@ -302,4 +311,3 @@ MIT for these bindings.
 
 See the [libfuse](https://github.com/libfuse/libfuse) license for Linux/BSD
 for the FUSE shared library license, which is LGPL
-

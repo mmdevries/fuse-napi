@@ -1,39 +1,65 @@
 {
-  "name": "@cocalc/fuse-native",
+  "name": "fuse-napi",
   "version": "2.4.3",
-  "description": "Node.js bindings for the FUSE api (Filesystem in Userspace)",
+  "description": "N-API bindings for FUSE (Filesystem in Userspace) on Linux",
+  "keywords": [
+    "fuse",
+    "filesystem",
+    "napi",
+    "native-addon",
+    "linux"
+  ],
   "main": "index.js",
+  "types": "./index.d.ts",
+  "files": [
+    "bin.js",
+    "binding.gyp",
+    "fuse-native.c",
+    "index.d.ts",
+    "index.js",
+    "semaphore.h"
+  ],
   "bin": {
-    "fuse-native": "./bin.js"
+    "fuse-napi": "./bin.js"
   },
   "gypfile": true,
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "nanoresource": "^1.3.0",
-    "napi-macros": "^2.0.0",
-    "node-gyp-build": "^4.8.0"
+    "napi-macros": "^2.2.2",
+    "node-gyp-build": "^4.8.4"
   },
   "devDependencies": {
     "concat-stream": "^2.0.0",
-    "prebuildify": "^3.0.4",
-    "tape": "^4.12.0"
+    "prebuildify": "^6.0.1",
+    "tape": "^5.10.2"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.8"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/sagemathinc/fuse-native.git"
+    "url": "git+https://github.com/mmdevries/fuse-napi.git"
   },
-  "author": " ()",
+  "author": "Matthijs de Vries",
   "contributors": [
     {
       "name": "Mathias Buus",
       "email": "@mafintosh"
+    },
+    {
+      "name": "SageMath, Inc."
     }
   ],
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/sagemathinc/fuse-native/issues"
+    "url": "https://github.com/mmdevries/fuse-napi/issues"
   },
-  "homepage": "https://github.com/sagemathinc/fuse-native",
+  "homepage": "https://github.com/mmdevries/fuse-napi#readme",
   "scripts": {
+    "check": "node --check index.js && node --check bin.js && node --check example.js",
     "install": "node-gyp-build",
     "test": "tape test/*.js",
     "clean": "rm -rf node_modules build",
