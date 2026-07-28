@@ -343,7 +343,7 @@ FUSE_METHOD_VOID(utimens, 5, 0, (const char *path, const struct timespec tv[2]),
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   FUSE_UINT64_TO_INTS_ARGV(l->atime, 3)
-  FUSE_UINT64_TO_INTS_ARGV(l->atime, 5)
+  FUSE_UINT64_TO_INTS_ARGV(l->mtime, 5)
 })
 
 FUSE_METHOD_VOID(release, 2, 0, (const char *path, struct fuse_file_info *info), {

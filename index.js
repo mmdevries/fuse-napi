@@ -469,7 +469,7 @@ class Fuse extends Nanoresource {
       }
       return
     }
-    this.ops.getattr(path, (err, stat) => {
+    this.ops.fgetattr(path, fd, (err, stat) => {
       if (err) return signal(err)
       return signal(0, getStatArray(stat))
     })
