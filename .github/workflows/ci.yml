@@ -8,16 +8,21 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    name: Node.js ${{ matrix.node-version }}
-    runs-on: ubuntu-22.04
+  linux:
+    name: Linux ${{ matrix.os }} / Node.js ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
 
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - ubuntu-22.04
+          - ubuntu-24.04
         node-version:
           - 20
           - 22
+          - 24
 
     steps:
       - name: Check out repository
@@ -30,10 +35,85 @@ jobs:
           package-manager-cache: false
 
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install --yes libfuse-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes fuse libfuse-dev pkg-config
 
       - name: Install package
-        run: npm install
+        run: npm ci
 
       - name: Check JavaScript syntax
         run: npm run check
+
+      - name: Enable FUSE device
+        run: |
+          sudo modprobe fuse
+          sudo chmod a+rw /dev/fuse
+
+      - name: Run Linux integration tests
+        run: npm test
+
+      - name: Verify external libfuse linkage
+        run: |
+          file build/Release/fuse.node
+          ldd build/Release/fuse.node | grep 'libfuse.so.2'
+
+  macos:
+    name: macOS ${{ matrix.arch }} / Node.js ${{ matrix.node-version }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            node-version: 20
+          - runner: macos-15-intel
+            arch: x64
+            node-version: 20
+          - runner: macos-15
+            arch: arm64
+            node-version: 22
+          - runner: macos-15-intel
+            arch: x64
+            node-version: 22
+          - runner: macos-15
+            arch: arm64
+            node-version: 24
+          - runner: macos-15-intel
+            arch: x64
+            node-version: 24
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node-version }}
+          package-manager-cache: false
+
+      - name: Install macFUSE build dependency
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: brew install --cask macfuse
+
+      - name: Install package
+        run: npm ci
+
+      - name: Check JavaScript syntax
+        run: npm run check
+
+      - name: Run non-mounting tests
+        run: npm run test:unit
+
+      - name: Verify architecture and external macFUSE linkage
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(node -p process.arch)" = "$EXPECTED_ARCH"
+          file build/Release/fuse.node
+          otool -L build/Release/fuse.node | grep '/usr/local/lib/libfuse.2.dylib'

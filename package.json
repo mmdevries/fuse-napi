@@ -1,13 +1,15 @@
 {
   "name": "fuse-napi",
   "version": "2.4.3",
-  "description": "N-API bindings for FUSE (Filesystem in Userspace) on Linux",
+  "description": "Node-API bindings for FUSE 2.9 on Linux and macOS",
   "keywords": [
     "fuse",
     "filesystem",
     "napi",
     "native-addon",
-    "linux"
+    "linux",
+    "macos",
+    "macfuse"
   ],
   "main": "index.js",
   "types": "./index.d.ts",
@@ -18,6 +20,7 @@
     "index.d.ts",
     "index.js",
     "lib/macfuse.js",
+    "prebuilds/",
     "scripts/fuse-config.js",
     "semaphore.h"
   ],
@@ -64,9 +67,9 @@
     "check": "node --check index.js && node --check bin.js && node --check example.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js",
     "install": "node-gyp-build",
     "test": "tape test/*.js",
+    "test:unit": "tape test/dependencies.js test/mount-ready.js",
     "clean": "rm -rf node_modules build",
     "prebuild": "prebuildify --napi --strip",
-    "prebuild-ia32": "prebuildify --napi --strip --arch=ia32",
     "configure": "NODE=$(which node) && sudo -E $NODE ./bin.js configure || true"
   }
 }
