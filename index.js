@@ -175,6 +175,7 @@ class Fuse extends Nanoresource {
 
   _fuseOptions () {
     const options = []
+    const hasValue = name => this.opts[name] !== undefined && this.opts[name] !== null
 
     if ((/\*|(^,)fuse-bindings(,$)/.test(process.env.DEBUG)) || this.opts.debug) options.push('debug')
     if (this.opts.allowOther) options.push('allow_other')
@@ -182,23 +183,23 @@ class Fuse extends Nanoresource {
     if (this.opts.autoUnmount) options.push('auto_unmount')
     if (this.opts.defaultPermissions) options.push('default_permissions')
     if (this.opts.blkdev) options.push('blkdev')
-    if (this.opts.blksize) options.push('blksize=' + this.opts.blksize)
-    if (this.opts.maxRead) options.push('max_read=' + this.opts.maxRead)
-    if (this.opts.fd) options.push('fd=' + this.opts.fd)
-    if (this.opts.userId) options.push('user_id=', this.opts.userId)
+    if (hasValue('blksize')) options.push('blksize=' + this.opts.blksize)
+    if (hasValue('maxRead')) options.push('max_read=' + this.opts.maxRead)
+    if (hasValue('fd')) options.push('fd=' + this.opts.fd)
+    if (hasValue('userId')) options.push('user_id=' + this.opts.userId)
     if (this.opts.fsname) options.push('fsname=' + this.opts.fsname)
     if (this.opts.subtype) options.push('subtype=' + this.opts.subtype)
     if (this.opts.kernelCache) options.push('kernel_cache')
     if (this.opts.autoCache) options.push('auto_cache')
-    if (this.opts.umask) options.push('umask=' + this.opts.umask)
-    if (this.opts.uid) options.push('uid=' + this.opts.uid)
-    if (this.opts.gid) options.push('gid=' + this.opts.gid)
-    if (this.opts.entryTimeout) options.push('entry_timeout=' + this.opts.entryTimeout)
-    if (this.opts.attrTimeout) options.push('attr_timeout=' + this.opts.attrTimeout)
-    if (this.opts.acAttrTimeout) options.push('ac_attr_timeout=' + this.opts.acAttrTimeout)
+    if (hasValue('umask')) options.push('umask=' + this.opts.umask)
+    if (hasValue('uid')) options.push('uid=' + this.opts.uid)
+    if (hasValue('gid')) options.push('gid=' + this.opts.gid)
+    if (hasValue('entryTimeout')) options.push('entry_timeout=' + this.opts.entryTimeout)
+    if (hasValue('attrTimeout')) options.push('attr_timeout=' + this.opts.attrTimeout)
+    if (hasValue('acAttrTimeout')) options.push('ac_attr_timeout=' + this.opts.acAttrTimeout)
     if (this.opts.noforget) options.push('noforget')
     if (this.opts.nonEmpty) options.push('nonempty')
-    if (this.opts.remember) options.push('remember=' + this.opts.remember)
+    if (hasValue('remember')) options.push('remember=' + this.opts.remember)
     if (this.opts.modules) options.push('modules=' + this.opts.modules)
 
     if (this.opts.displayFolder && IS_OSX) { // only works on osx
