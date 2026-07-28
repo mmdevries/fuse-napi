@@ -788,6 +788,7 @@ Fuse.ENOPROTOOPT = -92
 Fuse.EPROTONOSUPPORT = -93
 Fuse.ESOCKTNOSUPPORT = -94
 Fuse.EOPNOTSUPP = -95
+Fuse.ENOTSUP = -95
 Fuse.EPFNOSUPPORT = -96
 Fuse.EAFNOSUPPORT = -97
 Fuse.EADDRINUSE = -98
@@ -817,6 +818,10 @@ Fuse.EREMOTEIO = -121
 Fuse.EDQUOT = -122
 Fuse.ENOMEDIUM = -123
 Fuse.EMEDIUMTYPE = -124
+
+for (const [name, value] of Object.entries(os.constants.errno)) {
+  if (typeof Fuse[name] === 'number') Fuse[name] = -value
+}
 
 module.exports = Fuse
 
