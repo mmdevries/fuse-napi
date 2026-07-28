@@ -2,9 +2,9 @@
   "targets": [{
     "target_name": "fuse",
     'variables': {
-                    'fuse__include_dirs%': '<!(pkg-config fuse --cflags-only-I | sed s/-I//g)',
+                    'fuse__include_dirs%': '<!(node scripts/fuse-config.js include-dirs)',
                     'fuse__library_dirs%': '',
-                    'fuse__libraries%': '<!(pkg-config --libs-only-L --libs-only-l fuse)'
+                    'fuse__libraries%': '<!(node scripts/fuse-config.js libraries)'
                 },
     "include_dirs": [
       "<!(node -e \"require('napi-macros')\")",
@@ -18,6 +18,9 @@
     "libraries": [],
     "sources": [
       "fuse-native.c"
+    ],
+    'defines': [
+      '_FILE_OFFSET_BITS=64'
     ],
     'xcode_settings': {
       'OTHER_CFLAGS': [

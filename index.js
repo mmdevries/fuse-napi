@@ -4,9 +4,17 @@ const path = require('path')
 const { exec } = require('child_process')
 
 const Nanoresource = require('nanoresource')
-const binding = require('node-gyp-build')(__dirname)
+const loadBinding = require('node-gyp-build')
+const { wrapMacFuseLoadError } = require('./lib/macfuse')
 
 const IS_OSX = os.platform() === 'darwin'
+let binding
+try {
+  binding = loadBinding(__dirname)
+} catch (err) {
+  throw IS_OSX ? wrapMacFuseLoadError(err) : err
+}
+
 const OSX_FOLDER_ICON = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericFolderIcon.icns'
 const HAS_FOLDER_ICON = IS_OSX && fs.existsSync(OSX_FOLDER_ICON)
 const DEFAULT_TIMEOUT = 15 * 1000

@@ -17,6 +17,8 @@
     "fuse-native.c",
     "index.d.ts",
     "index.js",
+    "lib/macfuse.js",
+    "scripts/fuse-config.js",
     "semaphore.h"
   ],
   "bin": {
@@ -59,7 +61,7 @@
   },
   "homepage": "https://github.com/mmdevries/fuse-napi#readme",
   "scripts": {
-    "check": "node --check index.js && node --check bin.js && node --check example.js",
+    "check": "node --check index.js && node --check bin.js && node --check example.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js",
     "install": "node-gyp-build",
     "test": "tape test/*.js",
     "clean": "rm -rf node_modules build",
