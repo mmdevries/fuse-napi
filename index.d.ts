@@ -1,19 +1,19 @@
 declare namespace Fuse {
   // Stats object produced by fuse-native index.js function getStatArray
   export interface Stats {
-    mode: number;
-    uid: number;
-    gid: number;
-    size: number;
-    dev: number;
-    nlink: number;
-    ino: number;
-    rdev: number;
-    blksize: number;
-    blocks: number;
-    atime: Date;
-    mtime: Date;
-    ctime: Date;
+    mode?: number;
+    uid?: number;
+    gid?: number;
+    size?: number;
+    dev?: number;
+    nlink?: number;
+    ino?: number;
+    rdev?: number;
+    blksize?: number;
+    blocks?: number;
+    atime?: Date | number;
+    mtime?: Date | number;
+    ctime?: Date | number;
   }
 
   export interface OPERATIONS {
@@ -63,11 +63,16 @@ declare namespace Fuse {
         path: string,
         name: string,
         value: Buffer,
-        size: number,
+        position: number,
         flags: number,
         cb: (err: number) => void
     ) => void;
-    getxattr?: (path: string, name: string, size: number, cb: (err: number) => void) => void;
+    getxattr?: (
+        path: string,
+        name: string,
+        position: number,
+        cb: (err: number, value?: Buffer | null) => void
+    ) => void;
     listxattr?: (path: string, cb: (err: number, list?: string[]) => void) => void;
     removexattr?: (path: string, name: string, cb: (err: number) => void) => void;
     open?: (path: string, mode: number, cb: (err: number, fd?: number) => void) => void;
@@ -78,9 +83,7 @@ declare namespace Fuse {
         buffer: Buffer,
         length: number,
         position: number,
-        // This contradicts the code in index.js for _op_read, where the callback signature is (err, bytesRead)
-        // however, it appears that the calling code indeed interprets the "err" position as the value.
-        cb: (bytesRead?: number) => void
+        cb: (result: number) => void
     ) => void;
     write?: (
         path: string,
@@ -88,9 +91,7 @@ declare namespace Fuse {
         buffer: Buffer,
         length: number,
         position: number,
-        // This contradicts the code in index.js for _op_write, where the callback signature is (err, bytesWritten)
-        // however, it appears that the calling code indeed interprets the "err" position as the value.
-        cb: (bytesWritten?: number) => void
+        cb: (result: number) => void
     ) => void;
     // For every open() call there will be exactly one release() call with the same flags and
     // file handle. It is possible to have a file opened more than once, in which case only the
@@ -101,7 +102,7 @@ declare namespace Fuse {
     create?: (
         path: string,
         mode: number,
-        cb: (err: number, fd?: number, modePassedOn?: number) => void
+        cb: (err: number, fd?: number) => void
     ) => void;
     unlink?: (path: string, cb: (err: number) => void) => void;
     rename?: (src: string, dest: string, cb: (err: number) => void) => void;
@@ -111,21 +112,26 @@ declare namespace Fuse {
     rmdir?: (path: string, cb: (err: number) => void) => void;
   }
 
+  export interface Timeouts {
+    default?: number;
+    init?: number | false;
+    [operation: string]: number | false | undefined;
+  }
+
   // See https://github.com/refinio/fuse-native
-  // See https://man7.org/linux/man-pages/man8/mount.fuse3.8.html
   export interface OPTIONS {
     uid?: number;
     gid?: number;
-    timeout?: number;
-    displayFolder?: string;
+    timeout?: number | false | Timeouts;
+    displayFolder?: boolean;
     debug?: boolean;
     force?: boolean;
     mkdir?: boolean;
     allowOther?: boolean;
     allowRoot?: boolean;
     autoUnmount?: boolean;
-    defaultPermissions?: string;
-    blkdev?: string;
+    defaultPermissions?: boolean;
+    blkdev?: boolean;
     blksize?: number;
     maxRead?: number;
     nonEmpty?: boolean;
@@ -161,135 +167,136 @@ declare class Fuse {
   static isConfigured: (cb: (err: null | Error, result: boolean) => any) => void;
 
   // Error codes - numeric value retrieved from Fuse instance with errno(code)
-  static EPERM: -1;
-  static ENOENT: -2;
-  static ESRCH: -3;
-  static EINTR: -4;
-  static EIO: -5;
-  static ENXIO: -6;
-  static E2BIG: -7;
-  static ENOEXEC: -8;
-  static EBADF: -9;
-  static ECHILD: -10;
-  static EAGAIN: -11;
-  static ENOMEM: -12;
-  static EACCES: -13;
-  static EFAULT: -14;
-  static ENOTBLK: -15;
-  static EBUSY: -16;
-  static EEXIST: -17;
-  static EXDEV: -18;
-  static ENODEV: -19;
-  static ENOTDIR: -20;
-  static EISDIR: -21;
-  static EINVAL: -22;
-  static ENFILE: -23;
-  static EMFILE: -24;
-  static ENOTTY: -25;
-  static ETXTBSY: -26;
-  static EFBIG: -27;
-  static ENOSPC: -28;
-  static ESPIPE: -29;
-  static EROFS: -30;
-  static EMLINK: -31;
-  static EPIPE: -32;
-  static EDOM: -33;
-  static ERANGE: -34;
-  static EDEADLK: -35;
-  static ENAMETOOLONG: -36;
-  static ENOLCK: -37;
-  static ENOSYS: -38;
-  static ENOTEMPTY: -39;
-  static ELOOP: -40;
-  static EWOULDBLOCK: -11;
-  static ENOMSG: -42;
-  static EIDRM: -43;
-  static ECHRNG: -44;
-  static EL2NSYNC: -45;
-  static EL3HLT: -46;
-  static EL3RST: -47;
-  static ELNRNG: -48;
-  static EUNATCH: -49;
-  static ENOCSI: -50;
-  static EL2HLT: -51;
-  static EBADE: -52;
-  static EBADR: -53;
-  static EXFULL: -54;
-  static ENOANO: -55;
-  static EBADRQC: -56;
-  static EBADSLT: -57;
-  static EDEADLOCK: -35;
-  static EBFONT: -59;
-  static ENOSTR: -60;
-  static ENODATA: -61;
-  static ETIME: -62;
-  static ENOSR: -63;
-  static ENONET: -64;
-  static ENOPKG: -65;
-  static EREMOTE: -66;
-  static ENOLINK: -67;
-  static EADV: -68;
-  static ESRMNT: -69;
-  static ECOMM: -70;
-  static EPROTO: -71;
-  static EMULTIHOP: -72;
-  static EDOTDOT: -73;
-  static EBADMSG: -74;
-  static EOVERFLOW: -75;
-  static ENOTUNIQ: -76;
-  static EBADFD: -77;
-  static EREMCHG: -78;
-  static ELIBACC: -79;
-  static ELIBBAD: -80;
-  static ELIBSCN: -81;
-  static ELIBMAX: -82;
-  static ELIBEXEC: -83;
-  static EILSEQ: -84;
-  static ERESTART: -85;
-  static ESTRPIPE: -86;
-  static EUSERS: -87;
-  static ENOTSOCK: -88;
-  static EDESTADDRREQ: -89;
-  static EMSGSIZE: -90;
-  static EPROTOTYPE: -91;
-  static ENOPROTOOPT: -92;
-  static EPROTONOSUPPORT: -93;
-  static ESOCKTNOSUPPORT: -94;
-  static EOPNOTSUPP: -95;
-  static EPFNOSUPPORT: -96;
-  static EAFNOSUPPORT: -97;
-  static EADDRINUSE: -98;
-  static EADDRNOTAVAIL: -99;
-  static ENETDOWN: -100;
-  static ENETUNREACH: -101;
-  static ENETRESET: -102;
-  static ECONNABORTED: -103;
-  static ECONNRESET: -104;
-  static ENOBUFS: -105;
-  static EISCONN: -106;
-  static ENOTCONN: -107;
-  static ESHUTDOWN: -108;
-  static ETOOMANYREFS: -109;
-  static ETIMEDOUT: -110;
-  static ECONNREFUSED: -111;
-  static EHOSTDOWN: -112;
-  static EHOSTUNREACH: -113;
-  static EALREADY: -114;
-  static EINPROGRESS: -115;
-  static ESTALE: -116;
-  static EUCLEAN: -117;
-  static ENOTNAM: -118;
-  static ENAVAIL: -119;
-  static EISNAM: -120;
-  static EREMOTEIO: -121;
-  static EDQUOT: -122;
-  static ENOMEDIUM: -123;
-  static EMEDIUMTYPE: -124;
+  static EPERM: number;
+  static ENOENT: number;
+  static ESRCH: number;
+  static EINTR: number;
+  static EIO: number;
+  static ENXIO: number;
+  static E2BIG: number;
+  static ENOEXEC: number;
+  static EBADF: number;
+  static ECHILD: number;
+  static EAGAIN: number;
+  static ENOMEM: number;
+  static EACCES: number;
+  static EFAULT: number;
+  static ENOTBLK: number;
+  static EBUSY: number;
+  static EEXIST: number;
+  static EXDEV: number;
+  static ENODEV: number;
+  static ENOTDIR: number;
+  static EISDIR: number;
+  static EINVAL: number;
+  static ENFILE: number;
+  static EMFILE: number;
+  static ENOTTY: number;
+  static ETXTBSY: number;
+  static EFBIG: number;
+  static ENOSPC: number;
+  static ESPIPE: number;
+  static EROFS: number;
+  static EMLINK: number;
+  static EPIPE: number;
+  static EDOM: number;
+  static ERANGE: number;
+  static EDEADLK: number;
+  static ENAMETOOLONG: number;
+  static ENOLCK: number;
+  static ENOSYS: number;
+  static ENOTEMPTY: number;
+  static ELOOP: number;
+  static EWOULDBLOCK: number;
+  static ENOMSG: number;
+  static EIDRM: number;
+  static ECHRNG: number;
+  static EL2NSYNC: number;
+  static EL3HLT: number;
+  static EL3RST: number;
+  static ELNRNG: number;
+  static EUNATCH: number;
+  static ENOCSI: number;
+  static EL2HLT: number;
+  static EBADE: number;
+  static EBADR: number;
+  static EXFULL: number;
+  static ENOANO: number;
+  static EBADRQC: number;
+  static EBADSLT: number;
+  static EDEADLOCK: number;
+  static EBFONT: number;
+  static ENOSTR: number;
+  static ENODATA: number;
+  static ETIME: number;
+  static ENOSR: number;
+  static ENONET: number;
+  static ENOPKG: number;
+  static EREMOTE: number;
+  static ENOLINK: number;
+  static EADV: number;
+  static ESRMNT: number;
+  static ECOMM: number;
+  static EPROTO: number;
+  static EMULTIHOP: number;
+  static EDOTDOT: number;
+  static EBADMSG: number;
+  static EOVERFLOW: number;
+  static ENOTUNIQ: number;
+  static EBADFD: number;
+  static EREMCHG: number;
+  static ELIBACC: number;
+  static ELIBBAD: number;
+  static ELIBSCN: number;
+  static ELIBMAX: number;
+  static ELIBEXEC: number;
+  static EILSEQ: number;
+  static ERESTART: number;
+  static ESTRPIPE: number;
+  static EUSERS: number;
+  static ENOTSOCK: number;
+  static EDESTADDRREQ: number;
+  static EMSGSIZE: number;
+  static EPROTOTYPE: number;
+  static ENOPROTOOPT: number;
+  static EPROTONOSUPPORT: number;
+  static ESOCKTNOSUPPORT: number;
+  static EOPNOTSUPP: number;
+  static ENOTSUP: number;
+  static EPFNOSUPPORT: number;
+  static EAFNOSUPPORT: number;
+  static EADDRINUSE: number;
+  static EADDRNOTAVAIL: number;
+  static ENETDOWN: number;
+  static ENETUNREACH: number;
+  static ENETRESET: number;
+  static ECONNABORTED: number;
+  static ECONNRESET: number;
+  static ENOBUFS: number;
+  static EISCONN: number;
+  static ENOTCONN: number;
+  static ESHUTDOWN: number;
+  static ETOOMANYREFS: number;
+  static ETIMEDOUT: number;
+  static ECONNREFUSED: number;
+  static EHOSTDOWN: number;
+  static EHOSTUNREACH: number;
+  static EALREADY: number;
+  static EINPROGRESS: number;
+  static ESTALE: number;
+  static EUCLEAN: number;
+  static ENOTNAM: number;
+  static ENAVAIL: number;
+  static EISNAM: number;
+  static EREMOTEIO: number;
+  static EDQUOT: number;
+  static ENOMEDIUM: number;
+  static EMEDIUMTYPE: number;
 
   public opts: Fuse.OPTIONS;
   public mnt: string;
-  public ops: Fuse.OPERATIONS;
-  public timeout: number;
+  public ops?: Fuse.OPERATIONS;
+  public timeout: number | Fuse.Timeouts;
 
   public mount: (cb: (err: null | Error) => any) => void;
   public unmount: (cb: (err: null | Error) => any) => void;
