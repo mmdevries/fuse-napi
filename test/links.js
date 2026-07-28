@@ -55,7 +55,13 @@ tape('readlink', function (t) {
           t.same(dest, 'hello', 'link resolves')
 
           fs.readlink(path.join(mnt, 'long-link'), function (err, truncated) {
-            t.error(err, 'no error')
+            if (err) {
+              t.fail(err.stack || err.message)
+              return unmount(fuse, function () {
+                t.end()
+              })
+            }
+            t.pass('no error')
             t.ok(longTarget.startsWith(truncated), 'oversized link target is safely truncated to the caller buffer')
             t.ok(truncated.length < longTarget.length, 'oversized link no longer fails with ENAMETOOLONG')
 

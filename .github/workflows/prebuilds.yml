@@ -2,9 +2,12 @@ name: Node-API prebuilds
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
+    inputs:
+      publish:
+        description: Publish the verified tagged package to npm
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -20,13 +23,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           package-manager-cache: false
 
       - name: Verify package, lockfile, README, and release tag
         run: node scripts/verify-release.js
+
+  ci:
+    name: Required CI
+    needs: validate
+    uses: ./.github/workflows/ci.yml
 
   quality:
     name: Release quality gate
@@ -39,7 +47,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           package-manager-cache: false
@@ -63,6 +71,7 @@ jobs:
     name: Build ${{ matrix.platform }}-${{ matrix.arch }}
     needs:
       - validate
+      - ci
       - quality
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -89,7 +98,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           package-manager-cache: false
@@ -160,7 +169,7 @@ jobs:
           xcrun vtool -show-build "$PREBUILD" | grep 'minos 12.0'
 
       - name: Upload prebuild
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: prebuild-${{ matrix.platform }}-${{ matrix.arch }}
           path: prebuilds/
@@ -230,7 +239,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node-version }}
           package-manager-cache: false
@@ -251,7 +260,7 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Download native prebuild
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: prebuild-${{ matrix.platform }}-${{ matrix.arch }}
           path: prebuilds
@@ -274,7 +283,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           package-manager-cache: false
@@ -283,7 +292,7 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Download all prebuilds
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: prebuild-*
           path: prebuilds
@@ -307,7 +316,7 @@ jobs:
           shasum -a 256 fuse-napi-*.tgz > SHA256SUMS
 
       - name: Upload npm tarball
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-package
           path: |
@@ -340,8 +349,11 @@ jobs:
             arch: arm64
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
           package-manager-cache: false
@@ -350,7 +362,13 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libfuse2
+          sudo apt-get install --yes fuse libfuse2
+
+      - name: Enable Linux FUSE device
+        if: matrix.platform == 'linux'
+        run: |
+          sudo modprobe fuse
+          sudo chmod a+rw /dev/fuse
 
       - name: Install macFUSE runtime dependency
         if: matrix.platform == 'darwin'
@@ -359,7 +377,7 @@ jobs:
         run: brew install --cask macfuse
 
       - name: Download assembled npm package
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-package
           path: release
@@ -370,16 +388,80 @@ jobs:
           shasum -a 256 -c SHA256SUMS
           tarball="$(find "$PWD" -type f -name 'fuse-napi-*.tgz' -print -quit)"
           test -n "$tarball"
-          consumer="$(mktemp -d)"
+          consumer="$(mktemp -d "$RUNNER_TEMP/fuse-napi-consumer.XXXXXX")"
+          printf 'FUSE_NAPI_CONSUMER=%s\n' "$consumer" >> "$GITHUB_ENV"
           npm install --prefix "$consumer" --ignore-scripts "$tarball"
           test ! -d "$consumer/node_modules/fuse-napi/build"
           node -e "const Fuse = require(process.argv[1]); if (typeof Fuse !== 'function') process.exit(1)" \
             "$consumer/node_modules/fuse-napi"
 
+      - name: Mount and exercise the exact Linux npm tarball
+        if: matrix.platform == 'linux'
+        run: |
+          node scripts/package-mount-smoke.js \
+            "$FUSE_NAPI_CONSUMER/node_modules/fuse-napi"
+
+  macos-package-mount:
+    name: Mount npm tarball on macOS ${{ matrix.arch }}
+    needs: package
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: '["self-hosted","macOS","ARM64","macfuse"]'
+          - arch: x64
+            runner: '["self-hosted","macOS","X64","macfuse"]'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 20
+          package-manager-cache: false
+
+      - name: Verify prepared macFUSE host
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(node -p process.arch)" = "$EXPECTED_ARCH"
+          pkg-config --modversion fuse
+
+      - name: Run full source mount integration suite
+        run: |
+          npm ci
+          npm test
+
+      - name: Download assembled npm package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package
+          path: release
+
+      - name: Install and mount the exact npm tarball
+        run: |
+          cd release
+          shasum -a 256 -c SHA256SUMS
+          tarball="$(find "$PWD" -type f -name 'fuse-napi-*.tgz' -print -quit)"
+          test -n "$tarball"
+          consumer="$(mktemp -d "$RUNNER_TEMP/fuse-napi-consumer.XXXXXX")"
+          npm install --prefix "$consumer" --ignore-scripts "$tarball"
+          test ! -d "$consumer/node_modules/fuse-napi/build"
+          node "$GITHUB_WORKSPACE/scripts/package-mount-smoke.js" \
+            "$consumer/node_modules/fuse-napi"
+
   publish:
     name: Publish verified npm package
-    if: github.ref_type == 'tag'
-    needs: package-smoke
+    if: github.ref_type == 'tag' && inputs.publish
+    needs:
+      - package-smoke
+      - macos-package-mount
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: npm-production
@@ -389,7 +471,7 @@ jobs:
 
     steps:
       - name: Set up Node.js for trusted publishing
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
@@ -399,7 +481,7 @@ jobs:
         run: npm install --global npm@11.5.1
 
       - name: Download verified npm package
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: npm-package
           path: release

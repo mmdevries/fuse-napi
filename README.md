@@ -89,8 +89,10 @@ lifecycle, and option tests.
 
 The test suite is green on Linux arm64 with libfuse 2.9.9 and on Apple Silicon
 with macFUSE 5.3.3. Hosted CI is configured to build both macOS architectures
-but cannot load the macFUSE kernel extension; real Intel and Apple Silicon
-mount tests use the manual self-hosted workflow.
+but cannot load the macFUSE kernel extension. Prepared self-hosted runners
+perform real Intel and Apple Silicon mount tests on every `main` update. A
+release is additionally blocked until its exact npm tarball mounts and passes
+a readlink smoke test on Linux x64/arm64 and macOS Intel/Apple Silicon.
 
 ## Migrating from `@cocalc/fuse-native`
 

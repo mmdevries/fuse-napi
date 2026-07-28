@@ -6,6 +6,9 @@ const tape = require('tape')
 
 const root = path.resolve(__dirname, '..')
 const script = path.join(root, 'scripts', 'verify-release.js')
+const ciWorkflow = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8')
+const macosWorkflow = fs.readFileSync(path.join(root, '.github/workflows/macos-integration.yml'), 'utf8')
+const releaseWorkflow = fs.readFileSync(path.join(root, '.github/workflows/prebuilds.yml'), 'utf8')
 
 tape('release metadata accepts the exact package tag', function (t) {
   const result = verify({
@@ -54,6 +57,50 @@ tape('release verification requires all four prebuilds', function (t) {
   } finally {
     fs.rmSync(tempRoot, { recursive: true, force: true })
   }
+})
+
+tape('release publication is gated by real cross-platform mounts', function (t) {
+  t.match(ciWorkflow, /\n  workflow_call:\n/, 'the complete CI matrix is reusable by the release workflow')
+  t.match(
+    releaseWorkflow,
+    /\n  ci:\n[\s\S]*?uses: \.\/\.github\/workflows\/ci\.yml\n/,
+    'the release workflow invokes the complete CI matrix'
+  )
+  t.match(
+    releaseWorkflow,
+    /Mount and exercise the exact Linux npm tarball/,
+    'the assembled Linux package must perform a real mount'
+  )
+  t.match(
+    releaseWorkflow,
+    /\n  macos-package-mount:\n[\s\S]*?ARM64[\s\S]*?X64/,
+    'the assembled package must mount on Apple Silicon and Intel'
+  )
+  t.match(
+    releaseWorkflow,
+    /publish:\n[\s\S]*?needs:\n      - package-smoke\n      - macos-package-mount\n/,
+    'publication depends on every exact-package mount gate'
+  )
+  t.match(
+    releaseWorkflow,
+    /workflow_dispatch:\n    inputs:\n      publish:[\s\S]*?type: boolean/,
+    'publication requires an explicit manual boolean confirmation'
+  )
+  t.match(
+    releaseWorkflow,
+    /if: github\.ref_type == 'tag' && inputs\.publish/,
+    'only a manually confirmed run on an exact tag can publish'
+  )
+  t.notOk(
+    /\n  push:\n    tags:/.test(releaseWorkflow),
+    'pushing a tag cannot publish automatically'
+  )
+  t.match(
+    macosWorkflow,
+    /push:\n    branches:\n      - main/,
+    'real macOS mount coverage runs automatically for main'
+  )
+  t.end()
 })
 
 function verify (overrides, args = [], workingRoot = root) {

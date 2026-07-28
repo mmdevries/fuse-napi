@@ -940,9 +940,10 @@ FUSE_METHOD(readlink, 1, 1, (const char *path, char *linkname, size_t len), {
 }, {
   if (res == 0) {
     size_t linkname_length = 0;
+    size_t linkname_capacity = l->len > 1 ? l->len - 1 : l->len;
     if (l->len == 0 ||
         napi_get_value_string_utf8(
-          env, argv[2], l->linkname, l->len, &linkname_length
+          env, argv[2], l->linkname, linkname_capacity, &linkname_length
         ) != napi_ok) {
       res = -EIO;
     }
