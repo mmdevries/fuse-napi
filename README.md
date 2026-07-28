@@ -1,37 +1,95 @@
 # fuse-napi
 
-N-API bindings for [FUSE](https://github.com/libfuse/libfuse) on Linux.
+Node-API bindings for the FUSE 2.9 high-level API on Linux and macOS.
 
 > [!NOTE]
-> Development has just started. This package is not yet published to npm.
+> The port is under development and is not yet published to npm.
 
 This project starts from the exact published source of
 [`@cocalc/fuse-native@2.4.3`](https://www.npmjs.com/package/@cocalc/fuse-native/v/2.4.3).
-It dynamically links the system `libfuse` instead of shipping a bundled copy.
-See [UPSTREAM.md](./UPSTREAM.md) for reproducible provenance.
+It preserves that package's callback-based JavaScript API and uses
+`FUSE_USE_VERSION=29`. The native addon uses Node-API, with no direct V8 API
+dependency.
+
+The addon dynamically links an external FUSE 2 library:
+
+- Linux uses the system `libfuse.so.2`.
+- macOS uses the `libfuse.2.dylib` compatibility library installed by
+  [macFUSE](https://macfuse.github.io/).
+
+Neither libfuse nor macFUSE is bundled or installed by this package. See
+[UPSTREAM.md](./UPSTREAM.md) for reproducible provenance and
+[COMPATIBILITY.md](./COMPATIBILITY.md) for callback and mount-option details.
+
+## Supported targets
+
+| Platform | Architectures | Node.js |
+| --- | --- | --- |
+| Linux | x86-64, arm64 | 20, 22, 24 |
+| macOS | Intel x86-64, Apple Silicon arm64 | 20, 22, 24 |
 
 ## Requirements
 
-- Linux
-- Node.js and a C/C++ build toolchain
-- `pkg-config`
-- the libfuse 2 development headers
+### Linux
+
+Building from source requires a C/C++ toolchain, `pkg-config`, and the system
+libfuse 2 development package. Running a prebuild still requires the system
+libfuse 2 runtime.
 
 On Debian or Ubuntu:
 
 ```sh
-sudo apt-get install build-essential libfuse-dev pkg-config
+sudo apt-get install build-essential fuse libfuse-dev pkg-config
 ```
+
+### macOS
+
+[Install macFUSE](https://github.com/macfuse/macfuse/wiki/Getting-Started)
+before installing or loading `fuse-napi`:
+
+```sh
+brew install --cask macfuse
+```
+
+Approve the macFUSE system extension in System Settings when prompted and
+restart macOS if requested. Apple Silicon systems can additionally require
+enabling kernel extensions in Startup Security Utility from macOS Recovery.
+Installation alone is not sufficient until macFUSE is enabled.
+
+`fuse-napi` uses macFUSE's public libfuse 2 compatibility API and its default
+VFS backend. It does not implement FSKit directly. If the headers, dylib, or
+runtime are unavailable, installation/loading fails with an actionable
+macFUSE error.
 
 ## Development
 
 ```sh
-npm install
+npm ci
 npm test
 ```
 
-The inherited test suite passes on x86-64 Linux. At least three inherited
-tests were reported to fail on ARM64 Linux.
+`npm test` performs real mount operations and therefore needs `/dev/fuse` plus
+mount privileges on Linux, or an installed and approved macFUSE extension on
+macOS. `npm run test:unit` runs only the non-mounting dependency, errno,
+lifecycle, and option tests.
+
+The test suite is green on Linux arm64 with libfuse 2.9.9 and on Apple Silicon
+with macFUSE 5.3.3. Hosted CI is configured to build both macOS architectures
+but cannot load the macFUSE kernel extension; real Intel and Apple Silicon
+mount tests use the manual self-hosted workflow.
+
+## Migrating from `@cocalc/fuse-native`
+
+Change the package import; existing operation callbacks and mount methods are
+retained:
+
+```js
+const Fuse = require('fuse-napi')
+```
+
+Error constants are negated host errno values. Linux values remain unchanged;
+macOS receives the corresponding Darwin values. On macOS, filesystems that
+want NFC and NFD names to compare equal must normalize lookup keys themselves.
 
 ## API
 
@@ -63,13 +121,16 @@ Create a new `Fuse` object.
 }
 ```
 
-`opts` can be include:
+`opts` can include:
 
 ```js
-  displayFolder: 'Folder Name', // Add a name/icon to the mount volume on OSX,
-  debug: false,  // Enable detailed tracing of operations.
-  force: false,  // Attempt to unmount a the mountpoint before remounting.
-  mkdir: false   // Create the mountpoint before mounting.
+{
+  displayFolder: true, // Add a name/icon to the mounted volume on macOS.
+  name: 'Folder Name', // Volume name used with displayFolder.
+  debug: false,        // Enable detailed tracing of operations.
+  force: false,        // Attempt to unmount before remounting.
+  mkdir: false         // Create the mountpoint before mounting.
+}
 ```
 
 For a larger usage example, see CoCalc's
@@ -79,7 +140,7 @@ For a larger usage example, see CoCalc's
 
 Most of the [FUSE api](http://fuse.sourceforge.net/doxygen/structfuse__operations.html) is supported. In general the callback for each op should be called with `cb(returnCode, [value])` where the return code is a number (`0` for OK and `< 0` for errors). See below for a list of POSIX error codes.
 
-Typescript: see [index.d.ts](./index.d.ts).
+TypeScript: see [index.d.ts](./index.d.ts).
 
 #### `ops.init(cb)`
 
@@ -309,5 +370,7 @@ Called when a directory is being removed
 
 MIT for these bindings.
 
-See the [libfuse](https://github.com/libfuse/libfuse) license for Linux/BSD
-for the FUSE shared library license, which is LGPL
+The bindings retain their upstream MIT license and attribution. The external
+[libfuse](https://github.com/libfuse/libfuse) and
+[macFUSE](https://github.com/macfuse/macfuse) installations retain their own
+licenses.

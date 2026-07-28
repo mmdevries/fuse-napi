@@ -1,5 +1,21 @@
 # fuse-napi implementation plan
 
+## Status
+
+The first implementation milestone is complete on Linux arm64 and Apple
+Silicon macOS:
+
+- the current suite passes on Linux (119 assertions) and macOS (157
+  assertions);
+- the in-memory milestone covers mount, `mkdir`, `readdir`, `create`, `read`,
+  `write`, `rename`, `unlink`, and unmount without JavaScript API changes;
+- external libfuse/macFUSE discovery and diagnostics are implemented; and
+- hosted build plus prebuild workflows cover all requested OS, architecture,
+  and Node.js combinations.
+
+Native Intel macOS execution and the GitHub-hosted matrices still need results
+from their respective runners; an Intel cross-build is already verified.
+
 ## Scope
 
 `fuse-napi` will provide Node-API bindings for the FUSE 2.9 high-level API on
@@ -55,11 +71,12 @@ container using:
 - a real `/dev/fuse` device.
 
 The addon built as an aarch64 ELF shared object and all 85 inherited tests
-passed, including real mount and unmount operations. This supersedes the
-current README statement that inherited arm64 tests fail.
+passed, including real mount and unmount operations. After the portability
+and regression tests were added, the complete Linux arm64 suite passed all
+119 assertions.
 
-Native Linux x86-64 and the requested Ubuntu 22.04/24.04 and Node.js
-20/22/24 combinations still need to be exercised in CI.
+CI now defines Ubuntu 22.04/24.04 with Node.js 20/22/24. Native Linux x86-64
+and those hosted combinations await their first GitHub Actions results.
 
 ### macOS
 
@@ -108,9 +125,16 @@ the macFUSE VFS backend but could not complete:
 - that inherited test dereferenced the missing stat value and terminated the
   test process, leaving a mount that was explicitly cleaned up.
 
-The readiness race is the first lifecycle fix. Large-file behavior will be
-isolated in a dedicated macOS regression test rather than inferred from the
-rest of the interrupted suite.
+Those findings drove separate lifecycle and large-file regression changes
+rather than a broad rewrite.
+
+The implemented lifecycle fix waits for the mountpoint device to change
+before completing the public callback and reports a bounded, actionable
+visibility error. The inherited large-file expectations were adapted only
+where macFUSE legitimately issues read-before-write probes. The resulting
+Apple Silicon suite passes all 157 assertions, including the milestone,
+Finder access, Unicode, xattrs/resource forks, AppleDouble, permissions,
+timestamps, open-file rename/unlink, large files, and forced unmounts.
 
 A source-unmodified probe also passed `-o backend=fskit` directly to macFUSE's
 public libfuse API. It could not mount because the macFUSE privileged helper
@@ -127,40 +151,24 @@ The implementation is already Node-API based. `fuse-native.c` includes
 libuv and pthreads provide the worker-thread bridge.
 
 The shared high-level FUSE implementation is viable on both platforms. The
-known platform and correctness issues should be addressed with small changes:
+findings were handled as small, independently tested changes:
 
-1. `binding.gyp` relies unconditionally on `pkg-config fuse`. It needs
-   platform-aware discovery and actionable macFUSE installation errors.
-2. Loading a prebuild without macFUSE currently exposes a raw dynamic-loader
-   error instead of an actionable message.
-3. A mount can wait indefinitely for macFUSE authorization because the public
-   callback is only completed by the FUSE `init` operation. Conversely, after
-   `init`, the callback can fire before the mounted volume is visible at the
-   mount path.
-4. macOS unmount uses `diskutil unmount force`, while Linux uses
-   `fusermount -uz`; lifecycle cleanup and repeated/forced unmount behavior
-   require dedicated tests.
-5. The exported errno constants are Linux values. Common POSIX values used by
-   the first milestone match, but platform-specific and higher-numbered
-   errors need an explicit compatibility policy.
-6. macFUSE adds optional callbacks (`renamex`, `setvolname`, extended
-   timestamps, `chflags`, and others). They must remain optional and isolated;
-   the initial milestone can use the standard FUSE 2.9 subset.
-7. `utimens` currently forwards the access timestamp twice in native code
-   instead of forwarding the modification timestamp as its second value.
-8. `_op_fgetattr` checks for `fgetattr` but calls `getattr`.
-9. The `userId` mount option is serialized as two comma-separated values
-   instead of `user_id=<value>`.
-10. `index.d.ts` differs from the runtime API for xattrs, read/write
-    callbacks, and several option types. Corrections must not alter runtime
-    behavior.
-
-Items 7-10 are inherited defects. They will be fixed in separate commits with
-Linux regression coverage rather than folded into macOS platform work.
+| Finding | Resolution |
+| --- | --- |
+| Unconditional `pkg-config fuse` build | Platform-aware FUSE 2 discovery with a `/usr/local` macFUSE fallback and actionable errors. |
+| Raw missing-dylib error | Wrapped as an actionable external macFUSE dependency error. |
+| macOS mount-readiness race | Public mount completion now waits for device visibility with a timeout. |
+| Platform unmount behavior | Existing `fusermount -uz`/`diskutil unmount force` split retained and covered by lifecycle tests. |
+| Linux-only exported errno values | Known constants are mapped to negated host errno values; Linux remains unchanged. |
+| macFUSE-only callbacks | Deliberately deferred; the shared FUSE 2.9 API remains the contract. |
+| `utimens` forwarded `atime` twice | Corrected with distinct timestamp regression coverage. |
+| `fgetattr` called `getattr` | Corrected with argument/result forwarding coverage. |
+| Broken `userId` serialization and dropped zeroes | Corrected with mount-option unit coverage. |
+| Inaccurate TypeScript declarations | Aligned with xattrs, read/write, options, and platform errno behavior. |
 
 ## Implementation phases
 
-### Phase 0 — Baseline and contract
+### Phase 0 — Baseline and contract (complete)
 
 - Commit this plan and the compatibility matrices.
 - Replace stale README baseline claims with reproducible results.
@@ -173,7 +181,7 @@ Exit criteria:
 - supported and unsupported callbacks/options are explicit; and
 - no functional source change is mixed into the baseline commit.
 
-### Phase 1 — Build discovery and diagnostics
+### Phase 1 — Build discovery and diagnostics (complete)
 
 - Keep `pkg-config fuse` as the Linux source of compiler/linker flags.
 - Add a narrowly scoped macOS discovery path for macFUSE's libfuse 2
@@ -189,12 +197,11 @@ Exit criteria:
 - both macOS architectures build against macFUSE;
 - missing-dependency tests assert clear errors.
 
-### Phase 2 — Mount lifecycle portability
+### Phase 2 — Mount lifecycle portability (implemented for the VFS backend)
 
 - Retain one shared `struct fuse_operations` implementation.
 - Keep only signature/layout adaptations under `__APPLE__`.
-- Add a bounded mount-initialization failure path so missing authorization
-  cannot hang indefinitely.
+- Add a bounded post-`init` device-visibility failure path.
 - Complete the public macOS mount callback only after the mounted device is
   visible at the mount path.
 - Isolate platform unmount command selection and make errors actionable.
@@ -206,21 +213,23 @@ Exit criteria:
 - a minimal macOS mount reaches `init` and unmounts cleanly;
 - no public JavaScript signature changes.
 
-### Phase 3 — First milestone filesystem
+### Phase 3 — First milestone filesystem (complete on Linux and Apple Silicon)
 
 - Add one in-memory integration fixture exercising, in order:
   `mkdir`, `readdir`, `create`, `write`, `read`, `rename`, `unlink`, and
   unmount.
 - Run it on Linux and physical macOS hosts.
-- Add native Intel macOS execution, not only cross-compilation.
+- Run the same fixture natively on the configured Intel self-hosted runner;
+  cross-compilation alone is already covered.
 
 Exit criteria:
 
 - inherited Linux tests pass;
-- the milestone fixture passes on Apple Silicon and Intel macOS;
+- the milestone fixture passes on Apple Silicon; Intel remains a runner
+  validation item;
 - no existing JavaScript API changes are required by applications.
 
-### Phase 4 — macOS behavior coverage
+### Phase 4 — macOS behavior coverage (complete on Apple Silicon VFS)
 
 Add focused integration tests for:
 
@@ -238,7 +247,7 @@ Tests must identify whether they target macFUSE's VFS backend or an explicitly
 supported alternative. Backend-specific expectations must not be presented as
 portable FUSE behavior.
 
-### Phase 5 — CI and prebuilds
+### Phase 5 — CI and prebuilds (implemented; remote execution pending)
 
 Establish build/test matrices for:
 
@@ -267,20 +276,21 @@ Exit criteria:
 - runtime remains dynamically linked to external libfuse/macFUSE;
 - release jobs verify architecture and dynamic-library dependencies.
 
-## Commit sequence
+## Reviewable implementation commits
 
-Each item should remain independently reviewable and keep Linux green:
+Linux remained green across the functional sequence:
 
-1. `docs: record fuse 2.9 compatibility plan`
-2. `test: cover mount option serialization and dependency diagnostics`
-3. `build: discover libfuse on linux and macos`
-4. `fix: report missing macfuse dependency`
-5. `fix: bound macos mount initialization`
-6. `test: add cross-platform in-memory milestone filesystem`
-7. `fix: correct inherited callback forwarding defects`
-8. `ci: add supported os and node build matrix`
-9. `ci: produce node-api prebuilds`
-10. focused macOS behavior commits, one behavior group at a time
+1. `dd415af` — compatibility plan and matrices
+2. `33e0e7c` — macOS mount readiness
+3. `491b361` — cross-platform in-memory milestone
+4. `1de35c3` — macFUSE I/O behavior
+5. `e3c783e` — system libfuse/macFUSE discovery
+6. `f522ec8` — `fgetattr` and timestamp forwarding
+7. `6876daa` — focused macOS behavior coverage
+8. `a09cc7b` — hosted CI, self-hosted mounts, and prebuild matrices
+9. `bee00d2` — mount-option serialization
+10. `8fcf68e` — host errno values
+11. `0680455` — runtime-aligned TypeScript declarations
 
 ## Principal risks
 
@@ -291,14 +301,15 @@ Each item should remain independently reviewable and keep Linux green:
   kernel-backend mounts.
 - **ABI/runtime linkage:** prebuilds compile without bundling libfuse and must
   resolve the external library consistently on end-user systems.
-- **Darwin errno values:** returning Linux-only numeric constants can report
-  the wrong error on macOS.
 - **Finder behavior:** Finder generates metadata, xattr, resource-fork, and
-  open-handle patterns absent from the inherited suite.
-- **Unicode normalization:** macFUSE normalizes path names; applications must
-  not assume byte-preserving round trips between NFC and NFD.
+  open-handle patterns absent from ordinary Linux clients; focused regression
+  coverage must remain enabled.
+- **Unicode normalization:** the tested VFS backend preserves the callback's
+  NFD name and does not make an NFC lookup equivalent; applications needing
+  canonical equivalence must normalize their own keys.
 - **Unmount races:** the FUSE loop, external unmount helper, libuv handles,
-  and Node resource lifecycle currently have incomplete join/cleanup logic.
+  and Node resource lifecycle remain sensitive to interruption despite normal
+  and forced-unmount coverage.
 - **Large files:** JavaScript numbers are exact only through
   `Number.MAX_SAFE_INTEGER`; the current split-uint32 transport must be tested
   at multi-gigabyte offsets.
