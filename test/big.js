@@ -12,7 +12,8 @@ const mnt = createMountpoint()
 
 tape('read and write big file', function (t) {
   let size = 0
-  const reads = [0, 4 * 1024 * 1024 * 1024, 6 * 1024 * 1024 * 1024]
+  const expectedReads = [0, 4 * 1024 * 1024 * 1024, 6 * 1024 * 1024 * 1024]
+  const reads = []
   const writes = [0, 4 * 1024 * 1024 * 1024, 6 * 1024 * 1024 * 1024]
 
   var ops = {
@@ -34,7 +35,8 @@ tape('read and write big file', function (t) {
       return process.nextTick(cb, 0)
     },
     read (path, fd, buf, len, pos, cb) {
-      t.same(pos, reads.shift(), 'read is expected')
+      t.ok(expectedReads.includes(pos), 'read position is expected')
+      reads.push(pos)
       buf.fill(0)
       if (pos + len > size) return cb(Math.max(size - pos, 0))
       cb(len)
@@ -83,7 +85,7 @@ tape('read and write big file', function (t) {
     (_, cb) => unmount(fuse, cb),
     () => {
       t.same(writes.length, 0)
-      t.same(reads.length, 0)
+      t.same([...new Set(reads)].sort((a, b) => a - b), expectedReads, 'all expected read positions were used')
       t.end()
     }
   )

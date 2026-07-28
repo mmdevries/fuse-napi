@@ -29,6 +29,7 @@ tape('write', function (t) {
       return process.nextTick(cb, Fuse.ENOENT)
     },
     create: function (path, flags, cb) {
+      if (path !== '/hello') return process.nextTick(cb, Fuse.ENOENT)
       t.ok(!created, 'file not created yet')
       created = true
       process.nextTick(cb, 0, 42)
