@@ -4,6 +4,33 @@ declare namespace Fuse {
   export type Uint64 = number | bigint;
   export type FileHandle = Uint64;
 
+  export interface FileInfoResult {
+    fd?: FileHandle;
+    directIO?: boolean;
+    keepCache?: boolean;
+    nonseekable?: boolean;
+  }
+
+  export interface ConnectionInfo {
+    readonly protoMajor: number;
+    readonly protoMinor: number;
+    readonly asyncRead: boolean;
+    readonly maxWrite: number;
+    readonly maxReadahead: number;
+    readonly capable: number;
+    readonly want: number;
+    readonly maxBackground: number;
+    readonly congestionThreshold: number;
+  }
+
+  export interface InitConfig {
+    maxWrite?: number;
+    maxReadahead?: number;
+    maxBackground?: number;
+    congestionThreshold?: number;
+    want?: number;
+  }
+
   // Stats object produced by fuse-native index.js function getStatArray
   export interface Stats {
     mode?: number;
@@ -35,8 +62,7 @@ declare namespace Fuse {
     namemax?: Uint64;
   }
 
-  export interface OPERATIONS {
-    init?: (cb: (err: Result) => void) => void;
+  export interface CommonOperations {
     access?: (path: string, mode: number, cb: (err: Result) => void) => void;
     statfs?: (path: string, cb: (err: Result, stats?: Statfs) => void) => void;
     fgetattr?: (
@@ -51,7 +77,6 @@ declare namespace Fuse {
     flush?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
     fsync?: (path: string, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
     fsyncdir?: (path: string, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
-    readdir?: (path: string, cb: (err: Result, names?: string[], stats?: Stats[]) => void) => void;
     truncate?: (path: string, size: Int64, cb: (err: Result) => void) => void;
     ftruncate?: (path: string, fd: FileHandle, size: Int64, cb: (err: Result) => void) => void;
     utimens?: (path: string, atime: Int64, mtime: Int64, cb: (err: Result) => void) => void;
@@ -75,8 +100,16 @@ declare namespace Fuse {
     ) => void;
     listxattr?: (path: string, cb: (err: Result, list?: string[]) => void) => void;
     removexattr?: (path: string, name: string, cb: (err: Result) => void) => void;
-    open?: (path: string, flags: number, cb: (err: Result, fd?: FileHandle) => void) => void;
-    opendir?: (path: string, flags: number, cb: (err: Result, fd?: FileHandle) => void) => void;
+    open?: (
+        path: string,
+        flags: number,
+        cb: (err: Result, result?: FileHandle | FileInfoResult) => void
+    ) => void;
+    opendir?: (
+        path: string,
+        flags: number,
+        cb: (err: Result, result?: FileHandle | FileInfoResult) => void
+    ) => void;
     read?: (
         path: string,
         fd: FileHandle,
@@ -99,11 +132,6 @@ declare namespace Fuse {
     // value of release is ignored.
     release?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
     releasedir?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
-    create?: (
-        path: string,
-        mode: number,
-        cb: (err: Result, fd?: FileHandle) => void
-    ) => void;
     unlink?: (path: string, cb: (err: Result) => void) => void;
     rename?: (src: string, dest: string, cb: (err: Result) => void) => void;
     link?: (src: string, dest: string, cb: (err: Result) => void) => void;
@@ -111,6 +139,52 @@ declare namespace Fuse {
     mkdir?: (path: string, mode: number, cb: (err: Result) => void) => void;
     rmdir?: (path: string, cb: (err: Result) => void) => void;
   }
+
+  export type OPERATIONS = CommonOperations & (
+    | {
+        init?: (cb: (err: Result) => void) => void;
+        initWithConfig?: never;
+      }
+    | {
+        init?: never;
+        initWithConfig?: (
+            connection: Readonly<ConnectionInfo>,
+            cb: (err: Result, config?: InitConfig) => void
+        ) => void;
+      }
+  ) & (
+    | {
+        readdir?: (path: string, cb: (err: Result, names?: string[], stats?: Stats[]) => void) => void;
+        readdirPaged?: never;
+      }
+    | {
+        readdir?: never;
+        readdirPaged?: (
+            path: string,
+            fd: FileHandle,
+            offset: Int64,
+            cb: (err: Result, names?: string[], stats?: Stats[], nextOffsets?: Int64[]) => void
+        ) => void;
+      }
+  ) & (
+    | {
+        create?: (
+            path: string,
+            mode: number,
+            cb: (err: Result, result?: FileHandle | FileInfoResult) => void
+        ) => void;
+        createWithFlags?: never;
+      }
+    | {
+        create?: never;
+        createWithFlags?: (
+            path: string,
+            mode: number,
+            flags: number,
+            cb: (err: Result, result?: FileHandle | FileInfoResult) => void
+        ) => void;
+      }
+  );
 
   export interface Timeouts {
     default?: number | false;
@@ -284,13 +358,14 @@ declare class Fuse {
   static EDQUOT: number;
   static ENOMEDIUM: number;
   static EMEDIUMTYPE: number;
+  static ECANCELED: number;
 
   public opts: Fuse.OPTIONS;
   public mnt: string;
   public ops: Fuse.OPERATIONS;
   public timeout: number | Fuse.Timeouts;
 
-  public mount: (cb: (err: null | Error) => any) => void;
+  public mount: (cb: (err?: null | Error) => any) => void;
   public unmount: (cb: (err: null | Error) => any) => void;
   public errno: (code?: string) => number;
 

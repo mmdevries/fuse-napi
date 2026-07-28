@@ -16,6 +16,19 @@ tape('constructor and mount option inputs are validated', function (t) {
     'non-function operations are rejected'
   )
   t.throws(
+    () => new Fuse('/tmp/fuse-napi-invalid-enhanced-handler', { readdirPaged: true }),
+    /readdirPaged.*function/,
+    'non-function enhanced operations are rejected'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-conflicting-operations', {
+      readdir () {},
+      readdirPaged () {}
+    }),
+    /mutually exclusive/,
+    'legacy and enhanced operation variants cannot conflict'
+  )
+  t.throws(
     () => new Fuse('/tmp/fuse-napi-unsupported-handler', { error () {} }),
     /not a FUSE 2 operation/,
     'nonexistent legacy operation is rejected'
@@ -202,9 +215,9 @@ tape('I/O, directory, readlink, and xattr outputs are bounded', function (t) {
   })
 
   const readBuffer = Buffer.alloc(4)
-  fuse._op_read(function (err, bytes) {
+  fuse._op_read(function (err, returnedBuffer) {
     t.equal(err, Fuse.EIO, 'oversized read result becomes EIO')
-    t.equal(bytes, 0, 'oversized read exposes no bytes')
+    t.equal(returnedBuffer, readBuffer, 'failed read retains its owned request buffer')
   }, '/test', 1, readBuffer, readBuffer.length, 0, 0)
 
   fuse._op_readdir(err => t.equal(err, Fuse.EIO, 'invalid directory entry becomes EIO'), '/')
@@ -238,6 +251,100 @@ tape('I/O, directory, readlink, and xattr outputs are bounded', function (t) {
     [['read', 'RangeError'], ['readdir', 'TypeError'], ['readlink', 'TypeError']],
     'invalid operation outputs are reported'
   )
+  t.end()
+})
+
+tape('enhanced open, create, readdir, and init contracts are lossless', function (t) {
+  const largeOffset = 0x20000000000001n
+  const calls = []
+  const fuse = new Fuse('/tmp/fuse-napi-enhanced-contracts', {
+    initWithConfig (connection, cb) {
+      t.ok(Object.isFrozen(connection), 'connection snapshot is immutable')
+      t.equal(connection.protoMajor, 7, 'protocol major is exposed')
+      t.equal(connection.capable, 0b1111, 'kernel capabilities are exposed')
+      cb(0, {
+        maxWrite: 65536,
+        maxReadahead: 32768,
+        maxBackground: 8,
+        congestionThreshold: 4,
+        want: 0b0011
+      })
+    },
+    open (name, flags, cb) {
+      cb(0, { fd: largeOffset, directIO: true, keepCache: true, nonseekable: true })
+    },
+    createWithFlags (name, mode, flags, cb) {
+      calls.push([name, mode, flags])
+      cb(0, { fd: 42 })
+    },
+    readdirPaged (name, fd, offset, cb) {
+      calls.push([name, fd, offset])
+      cb(0, ['entry'], undefined, [largeOffset + 1n])
+    }
+  })
+  fuse._waitForMount = () => {}
+
+  fuse._op_init(function (err, config) {
+    t.equal(err, 0, 'validated init configuration succeeds')
+    t.deepEqual([...config], [31, 65536, 32768, 8, 4, 3], 'init settings are encoded exactly')
+  }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12)
+
+  fuse._op_open(function (err, fd, flags) {
+    t.equal(err, 0, 'enriched open succeeds')
+    t.equal(fd, largeOffset, 'enriched open preserves the file handle')
+    t.equal(flags, 7, 'all supported file-info result flags are encoded')
+  }, '/file', 0)
+
+  fuse._op_create(function (err, fd, flags) {
+    t.equal(err, 0, 'createWithFlags succeeds')
+    t.equal(fd, 42, 'createWithFlags returns its file handle')
+    t.equal(flags, 0, 'unset file-info result flags remain disabled')
+  }, '/new', 0o644, 0x241)
+
+  const offsetBits = BigInt.asUintN(64, largeOffset)
+  fuse._op_readdir(function (err, names, stats, offsets) {
+    t.equal(err, 0, 'paged readdir succeeds')
+    t.deepEqual(names, ['entry'], 'paged readdir names are retained')
+    t.deepEqual(stats, [], 'optional stats remain empty')
+    t.equal(joinInt64(offsets, 0), largeOffset + 1n, 'next offset remains a signed 64-bit value')
+  }, '/', 99n, Number(offsetBits & 0xffffffffn), Number(offsetBits >> 32n))
+
+  t.deepEqual(calls, [
+    ['/new', 0o644, 0x241],
+    ['/', 99n, largeOffset]
+  ], 'create flags, directory handle, and incoming offset are forwarded')
+  t.end()
+})
+
+tape('enhanced contracts reject unsafe values before the native boundary', function (t) {
+  const reported = []
+  const fuse = new Fuse('/tmp/fuse-napi-enhanced-validation', {
+    initWithConfig (connection, cb) {
+      cb(0, { want: 0x80 })
+    },
+    open (name, flags, cb) {
+      cb(0, { fd: 1, keepCache: 'yes' })
+    },
+    readdirPaged (name, fd, offset, cb) {
+      cb(0, ['entry'], [], [0])
+    }
+  }, {
+    onError (err, operation) {
+      reported.push([operation, err.constructor.name])
+    }
+  })
+  fuse._waitForMount = () => {}
+
+  fuse._op_init(err => t.equal(err, Fuse.EIO, 'unsupported init capabilities become EIO'),
+    7, 29, 1, 65536, 65536, 1, 0, 12, 9)
+  fuse._op_open(err => t.equal(err, Fuse.EIO, 'invalid file-info flags become EIO'), '/file', 0)
+  fuse._op_readdir(err => t.equal(err, Fuse.EIO, 'zero paged offset becomes EIO'), '/', 0, 0, 0)
+
+  t.deepEqual(reported, [
+    ['init', 'RangeError'],
+    ['open', 'TypeError'],
+    ['readdir', 'RangeError']
+  ], 'enhanced validation failures are reported with their operation')
   t.end()
 })
 

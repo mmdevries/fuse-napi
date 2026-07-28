@@ -1,8 +1,8 @@
 # FUSE 2.9 compatibility matrix
 
 This document describes the current `fuse-napi` contract inherited from
-`@cocalc/fuse-native@2.4.3`, including the completed first macOS portability
-milestone described in [PLAN.md](./PLAN.md).
+`@cocalc/fuse-native@2.4.3`, including the completed portability and
+production-hardening work for the first stable release.
 
 ## Callback matrix
 
@@ -11,7 +11,7 @@ The native layer exposes the FUSE 2.9 high-level API.
 
 | JavaScript callback | Linux libfuse 2 | macFUSE libfuse 2 | Current status and differences |
 | --- | --- | --- | --- |
-| `init(cb)` | Yes | Yes | Public mount completion waits until the mounted device is visible; startup failure is bounded by the init timeout. |
+| `init(cb)` / `initWithConfig(connection, cb)` | Yes | Yes | Legacy defaults remain unchanged. The enhanced variant exposes and validates the portable FUSE 2 connection fields before applying conservative limits/capabilities. Public mount completion waits until the mounted device is visible. |
 | `access(path, mode, cb)` | Yes | Yes | Shared implementation. Suppressed by `default_permissions`. |
 | `statfs(path, cb)` | Yes | Yes | Shared `struct statvfs` implementation with range-checked 64-bit fields. macFUSE also offers unsupported `statfs_x`. |
 | `getattr(path, cb)` | Yes | Yes | Shared, zero-initialized implementation with range-checked 64-bit fields and platform-specific timestamp members. |
@@ -19,25 +19,25 @@ The native layer exposes the FUSE 2.9 high-level API.
 | `flush(path, fd, cb)` | Yes | Yes | Shared implementation. May be called more than once per open. |
 | `fsync(path, datasync, fd, cb)` | Yes | Yes | Shared implementation. |
 | `fsyncdir(path, datasync, fd, cb)` | Yes | Yes | Shared implementation. |
-| `readdir(path, cb)` | Yes | Yes | Shared implementation; offset is ignored and entries are returned as one JavaScript array. |
+| `readdir(path, cb)` / `readdirPaged(path, fd, offset, cb)` | Yes | Yes | Legacy mode returns one array with zero filler offsets. The mutually exclusive paged variant forwards the directory handle and signed 64-bit offset and requires one non-zero resume offset per entry. |
 | `truncate(path, size, cb)` | Yes | Yes | Signed 64-bit transport; values outside the safe-number range are delivered as `bigint`. |
 | `ftruncate(path, fd, size, cb)` | Yes | Yes | Signed 64-bit transport; values outside the safe-number range are delivered as `bigint`. |
 | `utimens(path, atime, mtime, cb)` | Yes | Yes | Signed millisecond transport, including pre-epoch timestamps; distinct atime and mtime forwarding is regression-tested. |
-| `readlink(path, cb)` | Yes | Yes | Shared implementation. |
+| `readlink(path, cb)` | Yes | Yes | Shared implementation; oversized targets are safely truncated and NUL-terminated to the caller-provided buffer. |
 | `chown(path, uid, gid, cb)` | Yes | Yes | Shared implementation; uid/gid behavior is covered on macOS. |
 | `chmod(path, mode, cb)` | Yes | Yes | Shared implementation; permission changes are covered on macOS. |
 | `mknod(path, mode, dev, cb)` | Yes | Yes | Shared implementation; useful node types vary by host policy. |
-| `setxattr(path, name, value, position, flags, cb)` | Yes | Yes | macOS native signature includes `position`; Linux supplies position `0` to normalize the JS API. |
-| `getxattr(path, name, position, cb)` | Yes | Yes | macOS native signature includes `position`; callback returns a `Buffer`. Round trips, listing, removal, and resource forks are covered. |
-| `listxattr(path, cb)` | Yes | Yes | Uses an exact UTF-8/NUL size probe and returns `ERANGE` when the caller buffer is too small. |
+| `setxattr(path, name, value, position, flags, cb)` | Yes | Yes | macOS native signature includes `position`; Linux supplies position `0`. JavaScript receives a request-owned copy rather than borrowed kernel memory. |
+| `getxattr(path, name, position, cb)` | Yes | Yes | Callback returns a `Buffer`; validated bytes are copied into the native request only on completion. Round trips, listing, removal, and resource forks are covered. |
+| `listxattr(path, cb)` | Yes | Yes | Uses an exact UTF-8/NUL size probe, request-owned output storage, and returns `ERANGE` when the caller buffer is too small. |
 | `removexattr(path, name, cb)` | Yes | Yes | Shared implementation. |
-| `open(path, flags, cb)` | Yes | Yes | Shared implementation; macFUSE VFS and FSKit can produce different open modes. |
-| `opendir(path, flags, cb)` | Yes | Yes | Forwards the open flags, not the uninitialized file handle. |
-| `read(path, fd, buffer, length, position, cb)` | Yes | Yes | Signed 64-bit positions and lossless file handles; byte counts cannot exceed the supplied buffer. |
-| `write(path, fd, buffer, length, position, cb)` | Yes | Yes | Signed 64-bit positions and lossless file handles; byte counts cannot exceed the supplied buffer. |
+| `open(path, flags, cb)` | Yes | Yes | Shared implementation; primitive handles remain compatible and `{ fd, directIO, keepCache, nonseekable }` can set portable result bits. |
+| `opendir(path, flags, cb)` | Yes | Yes | Forwards open flags and accepts the same validated file-info result as `open`. |
+| `read(path, fd, buffer, length, position, cb)` | Yes | Yes | Signed 64-bit positions and lossless handles; uses owned output memory and copies only a validated byte count to FUSE. |
+| `write(path, fd, buffer, length, position, cb)` | Yes | Yes | Signed 64-bit positions and lossless handles; JavaScript receives an owned copy of the native request bytes. |
 | `release(path, fd, cb)` | Yes | Yes | Shared implementation; return value is ignored by FUSE. |
 | `releasedir(path, fd, cb)` | Yes | Yes | Shared implementation. |
-| `create(path, mode, cb)` | Yes | Yes | Shared implementation. |
+| `create(path, mode, cb)` / `createWithFlags(path, mode, flags, cb)` | Yes | Yes | Legacy mode is unchanged. The mutually exclusive enhanced variant also receives the original open flags; both accept enriched file-info results. |
 | `unlink(path, cb)` | Yes | Yes | Shared implementation; deletion while an open handle survives is covered on macOS. |
 | `rename(src, dest, cb)` | Yes | Yes | Standard rename only; macFUSE's optional `renamex` flags are not exposed. |
 | `link(src, dest, cb)` | Yes | Yes | Shared implementation. |

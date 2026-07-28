@@ -1,6 +1,6 @@
 {
   "name": "fuse-napi",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "description": "Node-API bindings for FUSE 2.9 on Linux and macOS",
   "keywords": [
     "fuse",
@@ -13,13 +13,28 @@
   ],
   "main": "index.js",
   "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "os": [
     "darwin",
     "linux"
   ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "files": [
+    "CHANGELOG.md",
     "COMPATIBILITY.md",
     "README.md",
+    "RELEASING.md",
+    "SECURITY.md",
     "UPSTREAM.md",
     "binding.gyp",
     "fuse-native.c",
@@ -27,7 +42,8 @@
     "index.js",
     "lib/macfuse.js",
     "prebuilds/",
-    "scripts/fuse-config.js"
+    "scripts/fuse-config.js",
+    "scripts/verify-release.js"
   ],
   "gypfile": true,
   "engines": {
@@ -39,9 +55,11 @@
     "node-gyp-build": "^4.8.4"
   },
   "devDependencies": {
+    "@types/node": "^20.19.43",
     "concat-stream": "^2.0.0",
     "prebuildify": "^6.0.1",
-    "tape": "^5.10.2"
+    "tape": "^5.10.2",
+    "typescript": "^7.0.2"
   },
   "overrides": {
     "brace-expansion": "5.0.8"
@@ -54,7 +72,7 @@
   "contributors": [
     {
       "name": "Mathias Buus",
-      "email": "@mafintosh"
+      "url": "https://github.com/mafintosh"
     },
     {
       "name": "SageMath, Inc."
@@ -65,12 +83,20 @@
     "url": "https://github.com/mmdevries/fuse-napi/issues"
   },
   "homepage": "https://github.com/mmdevries/fuse-napi#readme",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
-    "check": "node --check index.js && node --check example.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js",
+    "check": "node --check index.js && node --check example.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js && node --check scripts/verify-release.js",
     "install": "node-gyp-build",
     "test": "tape test/*.js",
-    "test:unit": "tape test/dependencies.js test/errno.js test/hardening.js test/mount-ready.js test/options.js",
+    "test:unit": "tape test/dependencies.js test/errno.js test/hardening.js test/mount-ready.js test/options.js test/release.js",
+    "test:types": "tsc -p tsconfig.json",
     "clean": "rm -rf node_modules build",
-    "prebuild": "prebuildify --napi --strip"
+    "prebuild": "prebuildify --napi --strip",
+    "verify:metadata": "node scripts/verify-release.js",
+    "verify:release": "node scripts/verify-release.js --artifacts",
+    "prepublishOnly": "node scripts/verify-release.js --artifacts"
   }
 }

@@ -1,5 +1,8 @@
 node_modules/
 build/
 coverage/
+/dist/
+/*.tgz
+/SHA256SUMS
 *.log
 .DS_Store

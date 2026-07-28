@@ -45,6 +45,9 @@ jobs:
       - name: Check JavaScript syntax
         run: npm run check
 
+      - name: Check TypeScript declarations
+        run: npm run test:types
+
       - name: Enable FUSE device
         run: |
           sudo modprobe fuse
@@ -106,6 +109,9 @@ jobs:
 
       - name: Check JavaScript syntax
         run: npm run check
+
+      - name: Check TypeScript declarations
+        run: npm run test:types
 
       - name: Run non-mounting tests
         run: npm run test:unit

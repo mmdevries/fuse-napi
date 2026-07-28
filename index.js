@@ -22,10 +22,28 @@ const MAX_INT32 = 0x7fffffff
 const MIN_INT32 = -0x80000000
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER)
 const XATTR_NOT_FOUND = -(os.constants.errno.ENOATTR || os.constants.errno.ENODATA || 61)
+const EMPTY_INIT_CONFIG = new Uint32Array(6)
+const FILE_INFO_DIRECT_IO = 1
+const FILE_INFO_KEEP_CACHE = 2
+const FILE_INFO_NONSEEKABLE = 4
+const FILE_INFO_RESULT_FIELDS = new Set(['fd', 'directIO', 'keepCache', 'nonseekable'])
+const INIT_CONFIG_FIELDS = new Map([
+  ['maxWrite', { index: 1, mask: 1, minimum: 1 }],
+  ['maxReadahead', { index: 2, mask: 2, minimum: 0 }],
+  ['maxBackground', { index: 3, mask: 4, minimum: 1 }],
+  ['congestionThreshold', { index: 4, mask: 8, minimum: 1 }],
+  ['want', { index: 5, mask: 16, minimum: 0 }]
+])
+const ENHANCED_OPERATIONS = new Map([
+  ['initWithConfig', binding.op_init],
+  ['readdirPaged', binding.op_readdir],
+  ['createWithFlags', binding.op_create]
+])
 
 const OpcodesAndDefaults = new Map([
   ['init', {
-    op: binding.op_init
+    op: binding.op_init,
+    defaults: [EMPTY_INIT_CONFIG]
   }],
   ['error', {
     op: binding.op_error
@@ -57,7 +75,7 @@ const OpcodesAndDefaults = new Map([
   }],
   ['readdir', {
     op: binding.op_readdir,
-    defaults: [[], []]
+    defaults: [[], [], new Uint32Array(0)]
   }],
   ['truncate', {
     op: binding.op_truncate
@@ -95,11 +113,11 @@ const OpcodesAndDefaults = new Map([
   }],
   ['open', {
     op: binding.op_open,
-    defaults: [0]
+    defaults: [0, 0]
   }],
   ['opendir', {
     op: binding.op_opendir,
-    defaults: [0]
+    defaults: [0, 0]
   }],
   ['read', {
     op: binding.op_read,
@@ -117,7 +135,7 @@ const OpcodesAndDefaults = new Map([
   }],
   ['create', {
     op: binding.op_create,
-    defaults: [0]
+    defaults: [0, 0]
   }],
   ['unlink', {
     op: binding.op_unlink
@@ -162,6 +180,20 @@ class Fuse extends Nanoresource {
         throw new TypeError(`Operation ${JSON.stringify(name)} must be a function`)
       }
     }
+    for (const [name] of ENHANCED_OPERATIONS) {
+      if (ops[name] !== undefined && typeof ops[name] !== 'function') {
+        throw new TypeError(`Operation ${JSON.stringify(name)} must be a function`)
+      }
+    }
+    for (const [legacy, enhanced] of [
+      ['init', 'initWithConfig'],
+      ['readdir', 'readdirPaged'],
+      ['create', 'createWithFlags']
+    ]) {
+      if (ops[legacy] && ops[enhanced]) {
+        throw new TypeError(`Operations ${JSON.stringify(legacy)} and ${JSON.stringify(enhanced)} are mutually exclusive`)
+      }
+    }
 
     this.opts = opts
     this.mnt = path.resolve(mnt)
@@ -182,6 +214,9 @@ class Fuse extends Nanoresource {
     const implemented = [binding.op_init, binding.op_getattr]
     if (ops) {
       for (const [name, { op }] of OpcodesAndDefaults) {
+        if (ops[name] && this._handlers[op]) implemented.push(op)
+      }
+      for (const [name, op] of ENHANCED_OPERATIONS) {
         if (ops[name] && this._handlers[op]) implemented.push(op)
       }
     }
@@ -295,35 +330,11 @@ class Fuse extends Nanoresource {
 
           if (timeout) clearTimeout(timeout)
 
-          if (err === Fuse.ETIMEDOUT) {
-            switch (name) {
-              case 'write':
-              case 'read':
-                return cb(err, 0, input[2].buffer)
-              case 'setxattr':
-              case 'getxattr':
-                return cb(err, input[2].buffer)
-              case 'listxattr':
-                return cb(err, input[1].buffer)
-            }
-          }
-
           cb(err, ...args)
         }
 
         function failSignal (err) {
-          switch (name) {
-            case 'write':
-            case 'read':
-              return signalOnce(err, 0, input[2].buffer)
-            case 'setxattr':
-            case 'getxattr':
-              return signalOnce(err, input[2].buffer)
-            case 'listxattr':
-              return signalOnce(err, input[1].buffer)
-            default:
-              return signalOnce(err)
-          }
+          return signalOnce(err)
         }
       }
 
@@ -334,18 +345,7 @@ class Fuse extends Nanoresource {
           if (!initError.code) initError.code = 'EFUSEINIT'
           self._failOpen(initError)
         }
-        switch (name) {
-          case 'write':
-          case 'read':
-            return cb(Fuse.EIO, 0, input[2].buffer)
-          case 'setxattr':
-          case 'getxattr':
-            return cb(Fuse.EIO, input[2].buffer)
-          case 'listxattr':
-            return cb(Fuse.EIO, input[1].buffer)
-          default:
-            return cb(Fuse.EIO)
-        }
+        return cb(Fuse.EIO)
       }
     }
   }
@@ -433,22 +433,57 @@ class Fuse extends Nanoresource {
 
   // Handlers
 
-  _op_init (signal) {
-    if (!this.ops.init) {
-      signal(0)
-      this._waitForMount()
-      return
-    }
-    return this.ops.init(err => {
-      signal(err)
+  _op_init (
+    signal,
+    protoMajor,
+    protoMinor,
+    asyncRead,
+    maxWrite,
+    maxReadahead,
+    capable,
+    want,
+    maxBackground,
+    congestionThreshold
+  ) {
+    const connection = Object.freeze({
+      protoMajor,
+      protoMinor,
+      asyncRead: asyncRead !== 0,
+      maxWrite,
+      maxReadahead,
+      capable,
+      want,
+      maxBackground,
+      congestionThreshold
+    })
+    const complete = (err, requested) => {
       if (err) {
+        signal(err)
         const initError = new Error(`FUSE init failed with result ${err}`)
         initError.code = 'EFUSEINIT'
         this._failOpen(initError)
-      } else {
-        this._waitForMount()
+        return
       }
-    })
+
+      let config
+      try {
+        config = getInitConfigArray(connection, requested)
+      } catch (err) {
+        this._reportOperationError(err, 'init', [connection, requested])
+        signal(Fuse.EIO)
+        const initError = err instanceof Error ? err : new Error(String(err))
+        initError.code = 'EFUSEINIT'
+        this._failOpen(initError)
+        return
+      }
+
+      signal(0, config)
+      this._waitForMount()
+    }
+
+    if (this.ops.initWithConfig) return this.ops.initWithConfig(connection, complete)
+    if (this.ops.init) return this.ops.init(err => complete(err))
+    return complete(0)
   }
 
   _completeOpen (err) {
@@ -626,24 +661,26 @@ class Fuse extends Nanoresource {
   }
 
   _op_open (signal, path, flags) {
-    return this.ops.open(path, flags, (err, fd) => {
-      if (err) return signal(err, 0)
-      return this._respond(signal, 'open', [], () => signal(0, normalizeFileHandle(fd)))
+    return this.ops.open(path, flags, (err, result) => {
+      if (err) return signal(err)
+      return this._respond(signal, 'open', [], () => signal(0, ...normalizeOpenResult(result)))
     })
   }
 
   _op_opendir (signal, path, flags) {
-    return this.ops.opendir(path, flags, (err, fd) => {
-      if (err) return signal(err, 0)
-      return this._respond(signal, 'opendir', [], () => signal(0, normalizeFileHandle(fd)))
+    return this.ops.opendir(path, flags, (err, result) => {
+      if (err) return signal(err)
+      return this._respond(signal, 'opendir', [], () => signal(0, ...normalizeOpenResult(result)))
     })
   }
 
-  _op_create (signal, path, mode) {
-    return this.ops.create(path, mode, (err, fd) => {
-      if (err) return signal(err, 0)
-      return this._respond(signal, 'create', [], () => signal(0, normalizeFileHandle(fd)))
-    })
+  _op_create (signal, path, mode, flags) {
+    const complete = (err, result) => {
+      if (err) return signal(err)
+      return this._respond(signal, 'create', [], () => signal(0, ...normalizeOpenResult(result)))
+    }
+    if (this.ops.createWithFlags) return this.ops.createWithFlags(path, mode, flags, complete)
+    return this.ops.create(path, mode, complete)
   }
 
   _op_utimens (signal, path, atimeLow, atimeHigh, mtimeLow, mtimeHigh) {
@@ -668,22 +705,23 @@ class Fuse extends Nanoresource {
 
   _op_read (signal, path, fd, buf, len, offsetLow, offsetHigh) {
     return this.ops.read(path, fd, buf, len, getSignedDoubleArg(offsetLow, offsetHigh), result => {
-      return this._respond(signal, 'read', [0, buf.buffer], () => {
-        return signal(normalizeIOResult(result, len), 0, buf.buffer)
+      return this._respond(signal, 'read', [buf], () => {
+        return signal(normalizeIOResult(result, len), buf)
       })
     })
   }
 
   _op_write (signal, path, fd, buf, len, offsetLow, offsetHigh) {
     return this.ops.write(path, fd, buf, len, getSignedDoubleArg(offsetLow, offsetHigh), result => {
-      return this._respond(signal, 'write', [0, buf.buffer], () => {
-        return signal(normalizeIOResult(result, len), 0, buf.buffer)
+      return this._respond(signal, 'write', [], () => {
+        return signal(normalizeIOResult(result, len))
       })
     })
   }
 
-  _op_readdir (signal, path) {
-    return this.ops.readdir(path, (err, names, stats) => {
+  _op_readdir (signal, path, fd, offsetLow, offsetHigh) {
+    const paged = !!this.ops.readdirPaged
+    const complete = (err, names, stats, nextOffsets) => {
       if (err) return signal(err)
       return this._respond(signal, 'readdir', [], () => {
         if (!Array.isArray(names) || !names.every(isValidDirectoryEntry)) {
@@ -692,43 +730,52 @@ class Fuse extends Nanoresource {
         if (stats !== undefined && !Array.isArray(stats)) {
           throw new TypeError('readdir stats must be an array')
         }
+        if (stats && stats.length !== 0 && stats.length !== names.length) {
+          throw new RangeError('readdir stats must be empty or align with names')
+        }
         if (stats) stats = stats.map(getStatArray)
-        return signal(0, names, stats || [])
+        const offsets = paged ? getReaddirOffsetsArray(nextOffsets, names.length) : new Uint32Array(0)
+        return signal(0, names, stats || [], offsets)
       })
-    })
+    }
+    if (paged) {
+      const offset = getSignedDoubleArg(offsetLow, offsetHigh)
+      return this.ops.readdirPaged(path, fd, offset, complete)
+    }
+    return this.ops.readdir(path, complete)
   }
 
   _op_setxattr (signal, path, name, value, position, flags) {
     return this.ops.setxattr(path, name, value, position, flags, err => {
-      return signal(err, value.buffer)
+      return signal(err)
     })
   }
 
   _op_getxattr (signal, path, name, valueBuf, position) {
     return this.ops.getxattr(path, name, position, (err, value) => {
-      if (err) return signal(err, valueBuf.buffer)
-      return this._respond(signal, 'getxattr', [valueBuf.buffer], () => {
-        if (value === null || value === undefined) return signal(XATTR_NOT_FOUND, valueBuf.buffer)
+      if (err) return signal(err)
+      return this._respond(signal, 'getxattr', [valueBuf], () => {
+        if (value === null || value === undefined) return signal(XATTR_NOT_FOUND)
         if (!Buffer.isBuffer(value)) throw new TypeError('getxattr value must be a Buffer or null')
-        if (valueBuf.length === 0) return signal(value.length, valueBuf.buffer)
-        if (value.length > valueBuf.length) return signal(Fuse.ERANGE, valueBuf.buffer)
+        if (valueBuf.length === 0) return signal(value.length, valueBuf)
+        if (value.length > valueBuf.length) return signal(Fuse.ERANGE)
         value.copy(valueBuf)
-        return signal(value.length, valueBuf.buffer)
+        return signal(value.length, valueBuf)
       })
     })
   }
 
   _op_listxattr (signal, path, listBuf) {
     return this.ops.listxattr(path, (err, list) => {
-      if (err) return signal(err, listBuf.buffer)
-      return this._respond(signal, 'listxattr', [listBuf.buffer], () => {
+      if (err) return signal(err)
+      return this._respond(signal, 'listxattr', [listBuf], () => {
         if (!Array.isArray(list) || !list.every(name => typeof name === 'string' && !name.includes('\0'))) {
           throw new TypeError('listxattr result must be an array of NUL-free strings')
         }
 
         const size = list.reduce((total, name) => total + Buffer.byteLength(name) + 1, 0)
-        if (listBuf.length === 0) return signal(size, listBuf.buffer)
-        if (size > listBuf.length) return signal(Fuse.ERANGE, listBuf.buffer)
+        if (listBuf.length === 0) return signal(size, listBuf)
+        if (size > listBuf.length) return signal(Fuse.ERANGE)
 
         let ptr = 0
         for (const name of list) {
@@ -736,7 +783,7 @@ class Fuse extends Nanoresource {
           listBuf[ptr++] = 0
         }
 
-        return signal(ptr, listBuf.buffer)
+        return signal(ptr, listBuf)
       })
     })
   }
@@ -987,7 +1034,7 @@ Fuse.ENOMEDIUM = -123
 Fuse.EMEDIUMTYPE = -124
 
 for (const [name, value] of Object.entries(os.constants.errno)) {
-  if (typeof Fuse[name] === 'number') Fuse[name] = -value
+  Fuse[name] = -value
 }
 
 module.exports = Fuse
@@ -1176,6 +1223,98 @@ function normalizeIOResult (result, length) {
 function normalizeFileHandle (value) {
   if (value === null || value === undefined) return 0
   return toUint64Value(value, 'file handle')
+}
+
+function normalizeOpenResult (result) {
+  if (result === null || result === undefined ||
+      typeof result === 'number' || typeof result === 'bigint') {
+    return [normalizeFileHandle(result), 0]
+  }
+  if (typeof result !== 'object' || Array.isArray(result)) {
+    throw new TypeError('open result must be a file handle or file-info object')
+  }
+
+  for (const name of Reflect.ownKeys(result)) {
+    if (typeof name !== 'string' || !FILE_INFO_RESULT_FIELDS.has(name)) {
+      throw new TypeError(`Unknown file-info property ${String(name)}`)
+    }
+  }
+  const fd = result.fd
+  const directIO = result.directIO
+  const keepCache = result.keepCache
+  const nonseekable = result.nonseekable
+  for (const [name, value] of [
+    ['directIO', directIO],
+    ['keepCache', keepCache],
+    ['nonseekable', nonseekable]
+  ]) {
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw new TypeError(`file-info.${name} must be a boolean`)
+    }
+  }
+
+  let flags = 0
+  if (directIO) flags |= FILE_INFO_DIRECT_IO
+  if (keepCache) flags |= FILE_INFO_KEEP_CACHE
+  if (nonseekable) flags |= FILE_INFO_NONSEEKABLE
+  return [normalizeFileHandle(fd), flags]
+}
+
+function getReaddirOffsetsArray (offsets, length) {
+  if (!Array.isArray(offsets) || offsets.length !== length) {
+    throw new RangeError('readdirPaged offsets must align exactly with names')
+  }
+  const encoded = new Uint32Array(length * 2)
+  for (let i = 0; i < offsets.length; i++) {
+    const offset = toInt64(offsets[i], `readdirPaged.offsets[${i}]`)
+    if (offset === 0n) throw new RangeError('readdirPaged offsets must be non-zero')
+    setInt64(encoded, i * 2, offset, `readdirPaged.offsets[${i}]`)
+  }
+  return encoded
+}
+
+function getInitConfigArray (connection, requested) {
+  if (requested === null || requested === undefined) return EMPTY_INIT_CONFIG
+  if (typeof requested !== 'object' || Array.isArray(requested)) {
+    throw new TypeError('init configuration must be an object')
+  }
+
+  const config = new Uint32Array(6)
+  for (const name of Reflect.ownKeys(requested)) {
+    if (typeof name !== 'string') throw new TypeError(`Unknown init configuration property ${String(name)}`)
+    const field = INIT_CONFIG_FIELDS.get(name)
+    if (!field) throw new TypeError(`Unknown init configuration property ${JSON.stringify(name)}`)
+    const value = toUint32(requested[name], `init configuration.${name}`)
+    if (value < field.minimum) {
+      throw new RangeError(`init configuration.${name} must be at least ${field.minimum}`)
+    }
+    config[0] |= field.mask
+    config[field.index] = value
+  }
+
+  for (const name of ['maxWrite', 'maxReadahead', 'maxBackground', 'congestionThreshold']) {
+    const field = INIT_CONFIG_FIELDS.get(name)
+    if ((config[0] & field.mask) !== 0 && config[field.index] > connection[name]) {
+      throw new RangeError(`init configuration.${name} cannot exceed the kernel value ${connection[name]}`)
+    }
+  }
+  const wantField = INIT_CONFIG_FIELDS.get('want')
+  if ((config[0] & wantField.mask) !== 0 &&
+      ((config[wantField.index] & (~connection.capable >>> 0)) >>> 0) !== 0) {
+    throw new RangeError('init configuration.want contains capabilities unsupported by the kernel')
+  }
+
+  const backgroundField = INIT_CONFIG_FIELDS.get('maxBackground')
+  const congestionField = INIT_CONFIG_FIELDS.get('congestionThreshold')
+  const hasBackground = (config[0] & backgroundField.mask) !== 0
+  const hasCongestion = (config[0] & congestionField.mask) !== 0
+  const maxBackground = hasBackground ? config[backgroundField.index] : connection.maxBackground
+  const congestionThreshold = hasCongestion ? config[congestionField.index] : connection.congestionThreshold
+  if ((hasBackground || hasCongestion) &&
+      congestionThreshold > maxBackground) {
+    throw new RangeError('init configuration.congestionThreshold cannot exceed maxBackground')
+  }
+  return config
 }
 
 function toUint32 (value, name) {

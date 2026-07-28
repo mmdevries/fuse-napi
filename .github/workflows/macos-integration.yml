@@ -56,4 +56,5 @@ jobs:
         run: |
           npm ci
           npm run check
+          npm run test:types
           npm test

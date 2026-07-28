@@ -1,4 +1,9 @@
-# fuse-napi implementation plan
+# fuse-napi implementation plan (historical)
+
+> This file preserves the original implementation record and baseline
+> observations. It is not the current release status or support contract.
+> See `README.md`, `COMPATIBILITY.md`, `CHANGELOG.md`, and `RELEASING.md` for
+> maintained production information.
 
 ## Status
 

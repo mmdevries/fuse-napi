@@ -2,8 +2,14 @@
 
 Node-API bindings for the FUSE 2.9 high-level API on Linux and macOS.
 
-> [!NOTE]
-> The port is under development and is not yet published to npm.
+Install the stable package from npm:
+
+```sh
+npm install fuse-napi
+```
+
+The public API follows semantic versioning. See [CHANGELOG.md](./CHANGELOG.md)
+for release notes and migration details.
 
 This project starts from the exact published source of
 [`@cocalc/fuse-native@2.4.3`](https://www.npmjs.com/package/@cocalc/fuse-native/v/2.4.3).
@@ -173,6 +179,20 @@ TypeScript: see [index.d.ts](./index.d.ts).
 
 Called on filesystem init.
 
+#### `ops.initWithConfig(connection, cb)`
+
+Enhanced, mutually exclusive alternative to `init`. `connection` is a frozen
+snapshot of the portable FUSE 2 connection fields:
+`protoMajor`, `protoMinor`, `asyncRead`, `maxWrite`, `maxReadahead`,
+`capable`, `want`, `maxBackground`, and `congestionThreshold`.
+
+The callback may return a conservative configuration containing `maxWrite`,
+`maxReadahead`, `maxBackground`, `congestionThreshold`, and/or `want`.
+Requested limits may not exceed the values supplied by the kernel, `want`
+must be a subset of `capable`, and the congestion threshold may not exceed
+the background-request limit. Omitting the configuration preserves all
+libfuse defaults.
+
 #### `ops.access(path, mode, cb)`
 
 Called before the filesystem accessed a file
@@ -243,6 +263,15 @@ ops.readdir = function (path, cb) {
 }
 ```
 
+#### `ops.readdirPaged(path, fd, offset, cb)`
+
+Enhanced, mutually exclusive alternative to `readdir` for large or remote
+directories. `fd` is the handle returned by `opendir`; `offset` is an opaque
+signed 64-bit resume value. Return
+`cb(0, names, stats, nextOffsets)`, where every name has a corresponding
+non-zero next offset. The kernel can resume at the last accepted offset when
+its output buffer is full.
+
 #### `ops.truncate(path, size, cb)`
 
 Called when a path is being truncated to a specific size
@@ -261,6 +290,9 @@ ops.readlink = function (path, cb) {
 }
 ```
 
+Targets longer than the kernel-provided buffer are truncated and
+NUL-terminated as required by the FUSE 2 high-level callback contract.
+
 #### `ops.chown(path, uid, gid, cb)`
 
 Called when ownership of a path is being changed
@@ -278,7 +310,9 @@ Called when a new device file is being made.
 
 Called when extended attributes is being set (see the extended docs for your platform).
 
-Copy the `value` buffer somewhere to store it.
+`value` is a request-owned copy and can safely be consumed asynchronously.
+Copy it only when your storage layer requires independent mutability or
+lifetime management.
 
 The position argument is mostly a legacy argument only used on MacOS but see the getxattr docs
 on Mac for more on that (you probably don't need to use that).
@@ -322,6 +356,12 @@ ops.open = function (path, flags, cb) {
 }
 ```
 
+The callback may alternatively return
+`{ fd, directIO, keepCache, nonseekable }`. This sets the corresponding
+portable `fuse_file_info` result bits while retaining primitive file-handle
+results for compatibility. `opendir` and both create variants accept the
+same result object.
+
 #### `ops.opendir(path, flags, cb)`
 
 Same as above but for directories
@@ -331,8 +371,12 @@ Same as above but for directories
 Called when contents of a file is being read. You should write the result of the read to the `buffer` and return the number of bytes written as the first argument in the callback.
 If no bytes were written (read is complete) return 0 in the callback.
 
+The buffer is owned by the JavaScript request. It remains valid if an
+operation times out or teardown starts; completed bytes are copied back to
+the kernel only after the callback result has been validated.
+
 ``` js
-var data = new Buffer('hello world')
+var data = Buffer.from('hello world')
 
 ops.read = function (path, fd, buffer, length, position, cb) {
   if (position >= data.length) return cb(0) // done
@@ -345,6 +389,9 @@ ops.read = function (path, fd, buffer, length, position, cb) {
 #### `ops.write(path, fd, buffer, length, position, cb)`
 
 Called when a file is being written to. You can get the data being written in `buffer` and you should return the number of bytes written in the callback as the first argument.
+
+The write buffer is a request-owned copy, so asynchronous consumers never
+reference kernel request memory after a timeout.
 
 ``` js
 ops.write = function (path, fd, buffer, length, position, cb) {
@@ -364,6 +411,12 @@ Same as above but for directories
 #### `ops.create(path, mode, cb)`
 
 Called when a new file is being opened.
+
+#### `ops.createWithFlags(path, mode, flags, cb)`
+
+Enhanced, mutually exclusive alternative to `create`. It also receives the
+original FUSE/POSIX open flags. Its callback accepts either a primitive file
+handle or the file-info result object described under `open`.
 
 #### `ops.utimens(path, atime, mtime, cb)`
 
@@ -403,3 +456,7 @@ The bindings retain their upstream MIT license and attribution. The external
 [libfuse](https://github.com/libfuse/libfuse) and
 [macFUSE](https://github.com/macfuse/macfuse) installations retain their own
 licenses.
+
+Security issues should be reported privately according to
+[SECURITY.md](./SECURITY.md). Maintainer release procedures are documented in
+[RELEASING.md](./RELEASING.md).
