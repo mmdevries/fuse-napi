@@ -7,8 +7,9 @@ const tape = require('tape')
 const root = path.resolve(__dirname, '..')
 const script = path.join(root, 'scripts', 'verify-release.js')
 const ciWorkflow = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8')
-const macosWorkflow = fs.readFileSync(path.join(root, '.github/workflows/macos-integration.yml'), 'utf8')
+const macosWorkflow = path.join(root, '.github/workflows/macos-integration.yml')
 const releaseWorkflow = fs.readFileSync(path.join(root, '.github/workflows/prebuilds.yml'), 'utf8')
+const releaseGuide = fs.readFileSync(path.join(root, 'RELEASING.md'), 'utf8')
 
 tape('release metadata accepts the exact package tag', function (t) {
   const result = verify({
@@ -59,7 +60,7 @@ tape('release verification requires all four prebuilds', function (t) {
   }
 })
 
-tape('release publication is gated by real cross-platform mounts', function (t) {
+tape('release artifacts retain automated Linux gates and manual macOS validation', function (t) {
   t.match(ciWorkflow, /\n  workflow_call:\n/, 'the complete CI matrix is reusable by the release workflow')
   t.match(
     releaseWorkflow,
@@ -71,34 +72,40 @@ tape('release publication is gated by real cross-platform mounts', function (t) 
     /Mount and exercise the exact Linux npm tarball/,
     'the assembled Linux package must perform a real mount'
   )
-  t.match(
-    releaseWorkflow,
-    /\n  macos-package-mount:\n[\s\S]*?ARM64[\s\S]*?X64/,
-    'the assembled package must mount on Apple Silicon and Intel'
+  t.notOk(
+    fs.existsSync(macosWorkflow),
+    'the standalone self-hosted macOS workflow is absent'
+  )
+  t.notOk(
+    /\n  macos-package-mount:\n/.test(releaseWorkflow),
+    'the release workflow has no self-hosted macOS mount job'
+  )
+  t.notOk(
+    /\n  publish:\n/.test(releaseWorkflow),
+    'the artifact workflow cannot publish to npm'
+  )
+  t.notOk(
+    /npm publish/.test(releaseWorkflow),
+    'the artifact workflow contains no npm publication command'
   )
   t.match(
     releaseWorkflow,
-    /publish:\n[\s\S]*?needs:\n      - package-smoke\n      - macos-package-mount\n/,
-    'publication depends on every exact-package mount gate'
-  )
-  t.match(
-    releaseWorkflow,
-    /workflow_dispatch:\n    inputs:\n      publish:[\s\S]*?type: boolean/,
-    'publication requires an explicit manual boolean confirmation'
-  )
-  t.match(
-    releaseWorkflow,
-    /if: github\.ref_type == 'tag' && inputs\.publish/,
-    'only a manually confirmed run on an exact tag can publish'
+    /workflow_dispatch:\n/,
+    'release artifact creation requires a manual workflow dispatch'
   )
   t.notOk(
     /\n  push:\n    tags:/.test(releaseWorkflow),
     'pushing a tag cannot publish automatically'
   )
   t.match(
-    macosWorkflow,
-    /push:\n    branches:\n      - main/,
-    'real macOS mount coverage runs automatically for main'
+    releaseGuide,
+    /both a physical Intel Mac and a physical Apple Silicon Mac/,
+    'the release guide requires both macOS architectures to be tested manually'
+  )
+  t.match(
+    releaseGuide,
+    /scripts\/package-mount-smoke\.js/,
+    'the release guide exercises the exact package with the mount smoke script'
   )
   t.end()
 })

@@ -14,12 +14,12 @@ All notable changes to this project are documented here. Releases follow
 - Lossless `bigint` transport for 64-bit file handles, offsets, sizes, inode
   values, counters, and timestamps outside JavaScript's safe-integer range.
 - Per-operation callback timeouts and structured operation-error reporting.
-- Exact npm-tarball installation tests and provenance-enabled trusted
-  publishing.
-- Mandatory real-mount release gates for exact npm tarballs on Linux x64/arm64
-  and macOS Intel/Apple Silicon.
-- Explicit manual confirmation on the exact release tag before npm
-  publication; tag pushes cannot publish automatically.
+- Exact npm-tarball installation tests and checksum-protected release
+  artifacts.
+- Mandatory automated real-mount release gates for exact npm tarballs on Linux
+  x64/arm64, with documented manual equivalents on macOS Intel/Apple Silicon.
+- Manual artifact creation on the exact release tag and manual npm publication
+  with two-factor authentication; tag pushes cannot publish automatically.
 
 ### Changed
 

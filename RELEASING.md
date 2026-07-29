@@ -1,27 +1,23 @@
 # Release procedure
 
-Releases are built and published only by
-`.github/workflows/prebuilds.yml`. Do not run `npm publish` from a development
-checkout.
+Release artifacts are built only by `.github/workflows/prebuilds.yml`.
+Publication is performed manually, with npm two-factor authentication, from
+the exact downloaded `npm-package` artifact after the manual macOS checks.
+Never rebuild or run `npm pack` from a development checkout for publication.
 
-## One-time npm and GitHub configuration
+## One-time release-host configuration
 
-1. Configure the npm trusted publisher with GitHub user `mmdevries`,
-   repository `fuse-napi`, workflow `prebuilds.yml`, and environment
-   `npm-production`. Explicitly select the allowed action `npm publish`.
-2. After the first OIDC release succeeds, disallow traditional automation
-   tokens for package publication.
-3. Create the GitHub environment `npm-production`, require a maintainer
-   approval, prevent self-review, disable administrator bypass, and allow only
-   protected tags matching `v*`.
-4. Protect `main` and release tags so required CI and macOS mount checks cannot
-   be bypassed.
-5. Keep both self-hosted macOS runners current and label them exactly as
-   documented in `.github/workflows/macos-integration.yml`; the pinned official
-   actions use their current Node.js 24 runtimes.
+1. Require two-factor authentication for npm publication and verify that the
+   release maintainer has publish access to `fuse-napi`.
+2. Protect `main` and immutable release tags so the hosted CI and artifact
+   workflow cannot be bypassed.
+3. Prepare both a physical Intel Mac and a physical Apple Silicon Mac with a
+   supported macOS release, an installed and approved macFUSE libfuse 2
+   compatibility runtime, `pkg-config`, and supported Node.js versions.
 
-The publish job uses a short-lived OIDC credential and npm provenance. No
-`NPM_TOKEN` secret is required.
+No self-hosted GitHub runners, npm trusted publisher, `npm-production`
+environment, or `NPM_TOKEN` secret are required. Manual OTP publication does
+not produce GitHub OIDC provenance.
 
 ## Preparing a release
 
@@ -39,19 +35,61 @@ The publish job uses a short-lived OIDC credential and npm provenance. No
    ```
 
 4. Commit the complete release candidate and push it to `main`.
-5. Wait for every required CI job to pass. The `macOS mount integration`
-   workflow runs automatically for `main`; all Intel and Apple Silicon jobs
-   must be green for the exact release commit.
-6. Create an immutable annotated tag matching the package version exactly:
+5. Wait for every hosted CI job to pass.
+6. On both a physical Intel Mac and a physical Apple Silicon Mac, use a clean
+   checkout of the exact release commit and run:
+
+   ```sh
+   npm ci
+   npm run check
+   npm run test:types
+   npm test
+   ```
+
+   Record the commit, architecture, macOS version, macFUSE version, Node.js
+   version, and result in the release notes.
+7. Create an immutable annotated tag matching the package version exactly:
 
    ```sh
    git tag -a v1.0.0 -m "fuse-napi v1.0.0"
    git push origin v1.0.0
    ```
 
-7. In GitHub Actions, manually run `Node-API prebuilds`, select the exact
-   release tag, and enable `Publish the verified tagged package to npm`.
-   Pushing a tag never publishes automatically.
+8. In GitHub Actions, manually run `Node-API prebuilds` on the exact release
+   tag. Pushing a tag never starts this workflow or publishes automatically.
+9. Wait until the complete workflow is green and download its `npm-package`
+   artifact. It contains the exact tarball and `SHA256SUMS`.
+10. On both physical Macs, unpack separate copies of the artifact and run the
+    following from the unpacked artifact directory. Replace `CHECKOUT` with
+    the clean checkout of the same release tag:
+
+    ```sh
+    CHECKOUT=/absolute/path/to/fuse-napi
+    shasum -a 256 -c SHA256SUMS
+    TARBALL="$(find "$PWD" -type f -name 'fuse-napi-*.tgz' -print -quit)"
+    test -n "$TARBALL"
+    CONSUMER="$(mktemp -d /tmp/fuse-napi-consumer.XXXXXX)"
+    npm install --prefix "$CONSUMER" --ignore-scripts "$TARBALL"
+    test ! -d "$CONSUMER/node_modules/fuse-napi/build"
+    node "$CHECKOUT/scripts/package-mount-smoke.js" \
+      "$CONSUMER/node_modules/fuse-napi"
+    ```
+
+    Both machines must load the packaged native prebuild and complete the real
+    readlink mount smoke test.
+11. Publish that same verified tarball manually. For a stable release use
+    `latest`; for a prerelease use `next`:
+
+    ```sh
+    read -s -p "npm OTP: " FUSE_NAPI_OTP
+    echo
+    npm publish "$TARBALL" \
+      --access public \
+      --provenance=false \
+      --tag latest \
+      --otp="$FUSE_NAPI_OTP"
+    unset FUSE_NAPI_OTP
+    ```
 
 Use a version such as `1.0.0-rc.1` first when validating release changes.
 Prerelease tags publish under npm's `next` dist-tag; stable versions publish
@@ -68,11 +106,13 @@ The manually confirmed workflow on the exact release tag:
 - loads each prebuild on Node.js 20, 22, and 24;
 - assembles one npm tarball containing all four binaries;
 - verifies and installs that exact tarball on all four target platforms;
-- performs real mounts with that tarball on Linux x64/arm64 and on prepared
-  macOS Intel/Apple Silicon hosts;
+- performs real mounts with that tarball on Linux x64/arm64;
 - records a SHA-256 checksum; and
-- publishes only the verified artifact through the protected
-  `npm-production` environment.
+- uploads the verified `npm-package` artifact without publishing it.
+
+Real macOS mounts are intentionally manual. The release is not approved until
+the full source suite and exact-tarball smoke test pass on physical Intel and
+Apple Silicon hosts.
 
 ## Post-release verification
 

@@ -84,8 +84,7 @@
   },
   "homepage": "https://github.com/mmdevries/fuse-napi#readme",
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "scripts": {
     "check": "node --check index.js && node --check example.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js && node --check scripts/package-mount-smoke.js && node --check scripts/verify-release.js",
