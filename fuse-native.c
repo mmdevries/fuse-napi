@@ -240,13 +240,12 @@ struct fuse_thread_s {
   char *mntopts;
   int mounted;
   int mount_pending;
+  int mount_cleanup_pending;
   int mount_error;
   int thread_started;
   int attr_initialized;
   int mutex_initialized;
-  int sem_initialized;
   int workers_sem_initialized;
-  int async_initialized;
   int loop_exit_async_initialized;
   atomic_int cleanup_scheduled;
   atomic_int cleanup_requested;
@@ -254,7 +253,6 @@ struct fuse_thread_s {
   int env_cleanup;
   int cleanup_error;
   int cleanup_thread_joined;
-  int async_init_status;
   atomic_int loop_result;
   size_t max_workers;
   size_t workers_started;
@@ -263,10 +261,8 @@ struct fuse_thread_s {
   fuse_worker_t *workers;
   napi_async_cleanup_hook_handle cleanup_hook;
 
-  uv_async_t async;
   uv_async_t loop_exit_async;
   uv_mutex_t mut;
-  uv_sem_t sem;
   uv_sem_t workers_finished;
   uv_work_t cleanup_work;
   uv_work_t mount_work;
@@ -274,6 +270,7 @@ struct fuse_thread_s {
 
 struct fuse_worker_s {
   fuse_thread_t *fuse;
+  fuse_thread_locals_t *locals;
   pthread_t thread;
   void *buffer;
   size_t buffer_size;
@@ -1639,105 +1636,74 @@ static void fuse_native_dispatch (uv_async_t* handle) {
   l->op_fn(handle, l, ft);
 }
 
-static void fuse_native_async_init (uv_async_t* handle) {
-  fuse_thread_t *ft = (fuse_thread_t *) handle->data;
-  fuse_thread_locals_t *l = calloc(1, sizeof(*l));
-  napi_handle_scope scope;
-  if (napi_open_handle_scope(ft->env, &scope) != napi_ok) {
-    ft->async_init_status = UV_EIO;
-    ft->async.data = NULL;
-    free(l);
-    uv_sem_post(&(ft->sem));
-    return;
-  }
-  ft->async_init_status = UV_ENOMEM;
-  ft->async.data = NULL;
-  if (l == NULL) {
+static int fuse_native_create_worker_locals (fuse_thread_t *ft) {
+  /*
+   * N-API values and libuv handles must be created on the JavaScript thread.
+   * Preallocating one local state per bounded worker also removes the
+   * cross-thread initialization handshake from the request path.
+   */
+  for (size_t i = 0; i < ft->max_workers; i++) {
+    fuse_thread_locals_t *l = calloc(1, sizeof(*l));
+    if (l == NULL) return UV_ENOMEM;
+
+    napi_handle_scope scope;
+    if (napi_open_handle_scope(ft->env, &scope) != napi_ok) {
+      free(l);
+      return UV_EIO;
+    }
+
+    l->fuse = ft;
+    atomic_init(&(l->waiting), 0);
+
+    napi_value buf;
+    if (napi_create_external_buffer(
+          ft->env,
+          sizeof(*l),
+          (char *) l,
+          NULL,
+          NULL,
+          &buf
+        ) != napi_ok ||
+        napi_create_reference(ft->env, buf, 1, &(l->self)) != napi_ok) {
+      free(l);
+      napi_close_handle_scope(ft->env, scope);
+      return UV_EIO;
+    }
+
+    int err = uv_sem_init(&(l->sem), 0);
+    if (err < 0) {
+      napi_delete_reference(ft->env, l->self);
+      free(l);
+      napi_close_handle_scope(ft->env, scope);
+      return err;
+    }
+    l->sem_initialized = 1;
+
+    err = uv_async_init(ft->loop, &(l->async), (uv_async_cb) fuse_native_dispatch);
+    if (err < 0) {
+      uv_sem_destroy(&(l->sem));
+      napi_delete_reference(ft->env, l->self);
+      free(l);
+      napi_close_handle_scope(ft->env, scope);
+      return err;
+    }
+    l->async_initialized = 1;
+    l->async.data = l;
+    uv_unref((uv_handle_t *) &(l->async));
+
+    l->next = ft->locals;
+    ft->locals = l;
     napi_close_handle_scope(ft->env, scope);
-    uv_sem_post(&(ft->sem));
-    return;
   }
-
-  l->fuse = ft;
-  atomic_init(&(l->waiting), 0);
-
-  napi_value buf;
-  if (napi_create_external_buffer(ft->env, sizeof(*l), (char *) l, NULL, NULL, &buf) != napi_ok ||
-      napi_create_reference(ft->env, buf, 1, &(l->self)) != napi_ok) {
-    free(l);
-    napi_close_handle_scope(ft->env, scope);
-    uv_sem_post(&(ft->sem));
-    return;
-  }
-
-  int err = uv_sem_init(&(l->sem), 0);
-  if (err < 0) {
-    napi_delete_reference(ft->env, l->self);
-    free(l);
-    ft->async_init_status = err;
-    napi_close_handle_scope(ft->env, scope);
-    uv_sem_post(&(ft->sem));
-    return;
-  }
-  l->sem_initialized = 1;
-
-  err = uv_async_init(ft->loop, &(l->async), (uv_async_cb) fuse_native_dispatch);
-  if (err < 0) {
-    uv_sem_destroy(&(l->sem));
-    napi_delete_reference(ft->env, l->self);
-    free(l);
-    ft->async_init_status = err;
-    napi_close_handle_scope(ft->env, scope);
-    uv_sem_post(&(ft->sem));
-    return;
-  }
-  l->async_initialized = 1;
-  uv_unref((uv_handle_t *) &(l->async));
-
-  l->async.data = l;
-  l->next = ft->locals;
-  ft->locals = l;
-  ft->async.data = l;
-  ft->async_init_status = 0;
-
-  napi_close_handle_scope(ft->env, scope);
-  uv_sem_post(&(ft->sem));
+  return 0;
 }
 
 static fuse_thread_locals_t* get_thread_locals (void) {
   struct fuse_context *ctx = fuse_get_context();
   if (ctx == NULL || ctx->private_data == NULL) return NULL;
   fuse_thread_t *ft = (fuse_thread_t *) ctx->private_data;
-
-  void *data = pthread_getspecific(thread_locals_key);
-
-  if (data != NULL && !atomic_load(&(ft->cleanup_requested))) {
-    return (fuse_thread_locals_t *) data;
-  }
-  if (data != NULL) return NULL;
-
-  uv_mutex_lock(&(ft->mut));
-  if (atomic_load(&(ft->cleanup_requested))) {
-    uv_mutex_unlock(&(ft->mut));
-    return NULL;
-  }
-  ft->async.data = ft;
-  ft->async_init_status = UV_EIO;
-
-  if (uv_async_send(&(ft->async)) < 0) {
-    uv_mutex_unlock(&(ft->mut));
-    return NULL;
-  }
-  uv_sem_wait(&(ft->sem));
-
-  fuse_thread_locals_t *l = ft->async_init_status == 0
-    ? (fuse_thread_locals_t*) ft->async.data
-    : NULL;
-
-  if (l != NULL) pthread_setspecific(thread_locals_key, (void *) l);
-  uv_mutex_unlock(&(ft->mut));
-
-  return l;
+  if (atomic_load(&(ft->cleanup_requested))) return NULL;
+  return (fuse_thread_locals_t *) pthread_getspecific(thread_locals_key);
 }
 
 static void fuse_native_record_loop_error (fuse_thread_t *ft, int error) {
@@ -1758,24 +1724,33 @@ static void* fuse_native_worker (void *data) {
 
   (void) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
   pthread_cleanup_push(fuse_native_worker_finished, worker);
-  while (!fuse_session_exited(session)) {
-    struct fuse_buf buffer = {
-      .size = worker->buffer_size,
-      .mem = worker->buffer
-    };
+  int locals_result = pthread_setspecific(
+    thread_locals_key,
+    (void *) worker->locals
+  );
+  if (locals_result != 0) {
+    fuse_native_record_loop_error(ft, -locals_result);
+    fuse_session_exit(session);
+  } else {
+    while (!fuse_session_exited(session)) {
+      struct fuse_buf buffer = {
+        .size = worker->buffer_size,
+        .mem = worker->buffer
+      };
 
-    (void) pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-    int result = fuse_session_receive_buf(session, &buffer, &ch);
-    (void) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-    if (result == -EINTR) continue;
-    if (result <= 0) {
-      if (result < 0) {
-        fuse_native_record_loop_error(ft, result);
-        fuse_session_exit(session);
+      (void) pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+      int result = fuse_session_receive_buf(session, &buffer, &ch);
+      (void) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+      if (result == -EINTR) continue;
+      if (result <= 0) {
+        if (result < 0) {
+          fuse_native_record_loop_error(ft, result);
+          fuse_session_exit(session);
+        }
+        break;
       }
-      break;
+      fuse_session_process_buf(session, &buffer, ch);
     }
-    fuse_session_process_buf(session, &buffer, ch);
   }
   pthread_cleanup_pop(1);
   return NULL;
@@ -1802,10 +1777,16 @@ static void* start_fuse_thread (void *data) {
     ft->workers = workers;
     uv_mutex_unlock(&(ft->mut));
 
+    fuse_thread_locals_t *locals = ft->locals;
     for (size_t i = 0;
          !atomic_load(&(ft->cleanup_requested)) && i < ft->max_workers;
          i++) {
+      if (locals == NULL) {
+        fuse_native_record_loop_error(ft, -EIO);
+        break;
+      }
       workers[i].fuse = ft;
+      workers[i].locals = locals;
       workers[i].buffer_size = buffer_size;
       workers[i].buffer = malloc(buffer_size);
       if (workers[i].buffer == NULL) {
@@ -1828,6 +1809,7 @@ static void* start_fuse_thread (void *data) {
       uv_mutex_lock(&(ft->mut));
       ft->workers_started++;
       uv_mutex_unlock(&(ft->mut));
+      locals = locals->next;
     }
 
     if (ft->workers_started != ft->max_workers ||
@@ -1903,12 +1885,34 @@ static void fuse_native_free_strings (fuse_thread_t *ft) {
   ft->mntopts = NULL;
 }
 
-static void fuse_native_failed_async_closed (uv_handle_t *handle) {
-  fuse_thread_t *ft = (fuse_thread_t *) handle->data;
+static void fuse_native_mount_cleanup_finished (fuse_thread_t *ft) {
+  ft->mount_cleanup_pending = 0;
+  if (ft->cleanup_hook != NULL) {
+    napi_remove_async_cleanup_hook(ft->cleanup_hook);
+    ft->cleanup_hook = NULL;
+  }
   if (ft->state_ref != NULL) {
     napi_delete_reference(ft->env, ft->state_ref);
     ft->state_ref = NULL;
   }
+}
+
+static void fuse_native_mount_close_complete (fuse_thread_t *ft) {
+  if (ft->close_pending == 0) return;
+  ft->close_pending--;
+  if (ft->close_pending == 0) fuse_native_mount_cleanup_finished(ft);
+}
+
+static void fuse_native_mount_local_closed (uv_handle_t *handle) {
+  fuse_thread_locals_t *l = (fuse_thread_locals_t *) handle->data;
+  fuse_thread_t *ft = l->fuse;
+  free(l);
+  fuse_native_mount_close_complete(ft);
+}
+
+static void fuse_native_mount_thread_async_closed (uv_handle_t *handle) {
+  fuse_thread_t *ft = (fuse_thread_t *) handle->data;
+  fuse_native_mount_close_complete(ft);
 }
 
 static void fuse_native_loop_exit_dispatch (uv_async_t *handle) {
@@ -1943,6 +1947,7 @@ static void fuse_native_loop_exit_dispatch (uv_async_t *handle) {
 }
 
 static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
+  ft->mount_cleanup_pending = 1;
   if (ft->fuse != NULL || ft->ch != NULL) {
     if (ft->ch != NULL) fuse_unmount(ft->mnt, ft->ch);
     if (ft->fuse != NULL && ft->ch != NULL) fuse_session_remove_chan(ft->ch);
@@ -1950,22 +1955,48 @@ static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
     ft->fuse = NULL;
     ft->ch = NULL;
   }
-  if (ft->async_initialized) {
-    ft->async.data = ft;
-    uv_close((uv_handle_t *) &(ft->async), fuse_native_failed_async_closed);
-    ft->async_initialized = 0;
-  } else if (ft->state_ref != NULL) {
-    napi_delete_reference(ft->env, ft->state_ref);
-    ft->state_ref = NULL;
+
+  /*
+   * ft is backed by a JavaScript Buffer and contains loop_exit_async inline.
+   * Each worker local owns another inline uv_async_t. Keep state_ref alive
+   * until every close callback has run; releasing it earlier makes libuv
+   * operate on reclaimable storage after a failed mount.
+   */
+  ft->close_pending = 0;
+  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
+    if (l->async_initialized) ft->close_pending++;
   }
+  if (ft->loop_exit_async_initialized) ft->close_pending++;
+
+  fuse_thread_locals_t *l = ft->locals;
+  ft->locals = NULL;
+  while (l != NULL) {
+    fuse_thread_locals_t *next = l->next;
+    if (l->self != NULL) {
+      napi_delete_reference(ft->env, l->self);
+      l->self = NULL;
+    }
+    if (l->sem_initialized) {
+      uv_sem_destroy(&(l->sem));
+      l->sem_initialized = 0;
+    }
+    if (l->async_initialized) {
+      l->async_initialized = 0;
+      l->async.data = l;
+      uv_close((uv_handle_t *) &(l->async), fuse_native_mount_local_closed);
+    } else {
+      free(l);
+    }
+    l = next;
+  }
+
   if (ft->loop_exit_async_initialized) {
     ft->loop_exit_async.data = ft;
-    uv_close((uv_handle_t *) &(ft->loop_exit_async), NULL);
+    uv_close(
+      (uv_handle_t *) &(ft->loop_exit_async),
+      fuse_native_mount_thread_async_closed
+    );
     ft->loop_exit_async_initialized = 0;
-  }
-  if (ft->sem_initialized) {
-    uv_sem_destroy(&(ft->sem));
-    ft->sem_initialized = 0;
   }
   if (ft->workers_sem_initialized) {
     uv_sem_destroy(&(ft->workers_finished));
@@ -1979,16 +2010,13 @@ static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
     pthread_attr_destroy(&(ft->attr));
     ft->attr_initialized = 0;
   }
-  if (ft->cleanup_hook != NULL) {
-    napi_remove_async_cleanup_hook(ft->cleanup_hook);
-    ft->cleanup_hook = NULL;
-  }
   if (ft->mount_cb != NULL) {
     napi_delete_reference(ft->env, ft->mount_cb);
     ft->mount_cb = NULL;
   }
   fuse_native_delete_references(ft);
   fuse_native_free_strings(ft);
+  if (ft->close_pending == 0) fuse_native_mount_cleanup_finished(ft);
 }
 
 NAPI_METHOD(fuse_native_cancel_mount) {
@@ -2177,10 +2205,6 @@ static void fuse_native_cleanup_work (uv_work_t *request) {
       l->sem_initialized = 0;
     }
   }
-  if (ft->sem_initialized) {
-    uv_sem_destroy(&(ft->sem));
-    ft->sem_initialized = 0;
-  }
   if (ft->workers_sem_initialized) {
     uv_sem_destroy(&(ft->workers_finished));
     ft->workers_sem_initialized = 0;
@@ -2217,7 +2241,6 @@ static void fuse_native_cleanup_after (uv_work_t *request, int status) {
     }
     if (l->async_initialized) ft->close_pending++;
   }
-  if (ft->async_initialized) ft->close_pending++;
   if (ft->loop_exit_async_initialized) ft->close_pending++;
 
   for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
@@ -2225,11 +2248,6 @@ static void fuse_native_cleanup_after (uv_work_t *request, int status) {
       l->async_initialized = 0;
       uv_close((uv_handle_t *) &(l->async), fuse_native_local_closed);
     }
-  }
-  if (ft->async_initialized) {
-    ft->async_initialized = 0;
-    ft->async.data = ft;
-    uv_close((uv_handle_t *) &(ft->async), fuse_native_thread_async_closed);
   }
   if (ft->loop_exit_async_initialized) {
     ft->loop_exit_async_initialized = 0;
@@ -2272,7 +2290,7 @@ static int fuse_native_begin_cleanup (fuse_thread_t *ft, int env_cleanup) {
 static void fuse_native_env_cleanup (napi_async_cleanup_hook_handle handle, void *data) {
   (void) handle;
   fuse_thread_t *ft = (fuse_thread_t *) data;
-  if (ft->mount_pending) {
+  if (ft->mount_pending || ft->mount_cleanup_pending) {
     ft->env_cleanup = 1;
     atomic_store(&(ft->mount_cancelled), 1);
     return;
@@ -2391,7 +2409,6 @@ static void fuse_native_mount_after (uv_work_t *request, int status) {
       ft->mount_error == FUSE_MOUNT_ERROR_NONE) {
     ft->mount_error = FUSE_MOUNT_ERROR_CANCELLED;
   }
-
   if (ft->mount_error == FUSE_MOUNT_ERROR_NONE) {
     int result = pthread_create(&(ft->thread), &(ft->attr), start_fuse_thread, ft);
     if (result == 0) {
@@ -2401,6 +2418,9 @@ static void fuse_native_mount_after (uv_work_t *request, int status) {
       ft->cleanup_error = result;
       ft->mount_error = FUSE_MOUNT_ERROR_THREAD;
     }
+  }
+  if (ft->mount_error != FUSE_MOUNT_ERROR_NONE) {
+    ft->mount_cleanup_pending = 1;
   }
 
   fuse_native_call_mount_callback(ft);
@@ -2568,19 +2588,9 @@ NAPI_METHOD(fuse_native_mount) {
   if (err < 0) goto mount_failed;
   ft->mutex_initialized = 1;
 
-  err = uv_sem_init(&(ft->sem), 0);
-  if (err < 0) goto mount_failed;
-  ft->sem_initialized = 1;
-
   err = uv_sem_init(&(ft->workers_finished), 0);
   if (err < 0) goto mount_failed;
   ft->workers_sem_initialized = 1;
-
-  err = uv_async_init(ft->loop, &(ft->async), (uv_async_cb) fuse_native_async_init);
-  if (err < 0) goto mount_failed;
-  ft->async_initialized = 1;
-  ft->async.data = ft;
-  uv_unref((uv_handle_t *) &(ft->async));
 
   err = uv_async_init(
     ft->loop,
@@ -2591,6 +2601,9 @@ NAPI_METHOD(fuse_native_mount) {
   ft->loop_exit_async_initialized = 1;
   ft->loop_exit_async.data = ft;
   uv_unref((uv_handle_t *) &(ft->loop_exit_async));
+
+  err = fuse_native_create_worker_locals(ft);
+  if (err < 0) goto mount_failed;
 
   err = pthread_attr_init(&(ft->attr));
   if (err != 0) goto mount_failed;
