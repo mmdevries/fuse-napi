@@ -40,3 +40,18 @@ path policy, data validation, secrets, and safe use of options such as
 The package dynamically links the host's libfuse 3 or macFUSE 5 runtime.
 Vulnerabilities in libfuse, macFUSE, the kernel extension, or the operating
 system should also be reported to their respective maintainers.
+
+Every mount performs a runtime preflight, but this does not replace host
+patching or least-privilege configuration. Production deployments should
+grant only the service account access to `/dev/fuse`, avoid `allowOther`
+unless it is an explicit security requirement, and set bounded operation
+timeouts.
+
+Release artifacts contain SHA-256 checksums and a CycloneDX SBOM and receive
+GitHub build-provenance and SBOM attestations. Native CI includes static
+analysis, deterministic boundary fuzzing, ASan/UBSan integration, and
+repeated mount/teardown testing. LeakSanitizer is disabled for the mounted
+Node.js process because the upstream Node runtime is not leak-clean at exit;
+bounded RSS is checked separately by the soak test. The normal limit is
+128 MiB; sanitizer CI permits 192 MiB to account for its bounded shadow and
+quarantine memory.

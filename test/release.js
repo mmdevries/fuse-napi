@@ -46,7 +46,7 @@ tape('manual publishing without a release tag is rejected', function (t) {
   t.end()
 })
 
-tape('release verification requires all four prebuilds', function (t) {
+tape('release verification requires every supported ABI prebuild', function (t) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fuse-napi-release-test-'))
   fs.mkdirSync(path.join(tempRoot, 'scripts'))
   for (const filename of ['package.json', 'package-lock.json', 'README.md']) {
@@ -65,11 +65,9 @@ tape('release verification requires all four prebuilds', function (t) {
 })
 
 tape('release artifacts retain automated Linux gates and manual macOS validation', function (t) {
-  t.match(ciWorkflow, /\n  workflow_dispatch:\n/, 'standalone CI requires a manual workflow dispatch')
-  t.notOk(
-    /\n  (?:push|pull_request):\n/.test(ciWorkflow),
-    'pushes and pull requests cannot start CI'
-  )
+  t.match(ciWorkflow, /\n  workflow_dispatch:\n/, 'CI remains manually dispatchable')
+  t.match(ciWorkflow, /\n  push:\n/, 'pushes automatically run the complete CI gate')
+  t.match(ciWorkflow, /\n  pull_request:\n/, 'pull requests automatically run the complete CI gate')
   t.match(ciWorkflow, /\n  workflow_call:\n/, 'the complete CI matrix is reusable by the release workflow')
   t.match(
     releaseWorkflow,
@@ -81,8 +79,20 @@ tape('release artifacts retain automated Linux gates and manual macOS validation
     /Mount and exercise the exact Linux npm tarball/,
     'the assembled Linux package must perform a real mount'
   )
+  t.match(
+    releaseWorkflow,
+    /Mount exact npm tarball with libfuse 3\.18 \/ SONAME 4/,
+    'the assembled modern Linux package must perform a real syscall mount'
+  )
   t.match(ciWorkflow, /libfuse3-dev/, 'CI builds against FUSE 3 headers')
   t.match(ciWorkflow, /libfuse3\.so\.3/, 'CI verifies the FUSE 3 runtime ABI')
+  t.match(ciWorkflow, /libfuse3\.so\.4/, 'CI verifies the modern FUSE 3 runtime ABI')
+  t.match(ciWorkflow, /runtime\.hasStatx/, 'CI verifies native statx support')
+  t.match(ciWorkflow, /scan-build --status-bugs/, 'CI runs a native static analyzer')
+  t.match(ciWorkflow, /-fsanitize=address,undefined/, 'CI runs ASan and UBSan')
+  t.match(ciWorkflow, /npm run test:fuzz/, 'CI runs deterministic boundary fuzzing')
+  t.match(ciWorkflow, /npm run test:soak/, 'CI runs repeated mount and teardown cycles')
+  t.match(ciWorkflow, /FUSE_NAPI_SOAK_RSS_LIMIT_MB: 192/, 'sanitizer RSS remains bounded')
   t.notOk(/\blibfuse-dev\b/.test(ciWorkflow), 'CI no longer installs FUSE 2 headers')
   t.match(releaseWorkflow, /node-version: 26/, 'release smoke tests include Node.js 26')
   t.notOk(
@@ -110,6 +120,10 @@ tape('release artifacts retain automated Linux gates and manual macOS validation
     /\n  push:\n    tags:/.test(releaseWorkflow),
     'pushing a tag cannot publish automatically'
   )
+  t.match(releaseWorkflow, /npm sbom --omit=dev/, 'the package includes a production SBOM')
+  t.match(releaseWorkflow, /actions\/attest@/, 'the package and SBOM are attested')
+  t.match(releaseWorkflow, /artifact-metadata: write/, 'attestation storage is authorized')
+  t.match(releaseWorkflow, /linux-x64-fuse4/, 'the release contains SONAME 4 prebuilds')
   t.match(
     releaseGuide,
     /both a physical Intel Mac and a physical Apple Silicon Mac/,

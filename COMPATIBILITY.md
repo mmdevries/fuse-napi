@@ -1,8 +1,8 @@
 # FUSE 3 compatibility matrix
 
 This document describes the current `fuse-napi` contract inherited from
-`@cocalc/fuse-native@2.4.3`, including the completed portability and
-production-hardening work for the first stable release.
+`@cocalc/fuse-native@2.4.3`, including its FUSE 3 portability and
+production-hardening guarantees.
 
 ## Callback matrix
 
@@ -15,18 +15,18 @@ The native layer targets the FUSE 3.1 high-level API
 | `init(cb)` / `initWithConfig(connection, cb)` | Yes | Yes | Legacy defaults remain unchanged. The enhanced variant exposes and validates the portable FUSE 3 connection fields before applying conservative limits/capabilities. Public mount completion waits until the mounted device is visible. |
 | `access(path, mode, cb)` | Yes | Yes | Shared implementation. Suppressed by `default_permissions`. |
 | `statfs(path, cb)` | Yes | Yes | Shared `struct statvfs` implementation with range-checked 64-bit fields. macFUSE also offers unsupported `statfs_x`. |
-| `getattr(path, cb)` | Yes | Yes | Shared, zero-initialized implementation with range-checked 64-bit fields and platform-specific timestamp members. |
-| `fgetattr(path, fd, cb)` | Yes | Yes | Shared implementation; path, descriptor, and result forwarding are regression-tested. |
+| `getattr(path, cb)` | Yes | Yes | Shared, zero-initialized implementation with range-checked 64-bit fields and platform-specific timestamp members. A null path is routed to `fgetattr`. |
+| `fgetattr(path, fd, cb)` | Yes | Yes | Handle-aware implementation; path can be null with `nullPathOk`. |
 | `flush(path, fd, cb)` | Yes | Yes | Shared implementation. May be called more than once per open. |
 | `fsync(path, datasync, fd, cb)` | Yes | Yes | Shared implementation. |
 | `fsyncdir(path, datasync, fd, cb)` | Yes | Yes | Shared implementation. |
 | `readdir(path, cb)` / `readdirPaged(path, fd, offset, cb)` | Yes | Yes | Legacy mode returns one array with zero filler offsets. The mutually exclusive paged variant forwards the directory handle and signed 64-bit offset and requires one non-zero resume offset per entry. |
 | `truncate(path, size, cb)` | Yes | Yes | Signed 64-bit transport; values outside the safe-number range are delivered as `bigint`. |
 | `ftruncate(path, fd, size, cb)` | Yes | Yes | Signed 64-bit transport; values outside the safe-number range are delivered as `bigint`. |
-| `utimens(path, atime, mtime, cb)` / `utimensWithTimespec(path, atime, mtime, cb)` | Yes | Yes | The legacy variant transports signed milliseconds. The mutually exclusive enhanced variant preserves seconds and nanoseconds exactly and safely enables `UTIME_NOW`/`UTIME_OMIT`. |
+| `utimens(path, atime, mtime, cb)` / `utimensWithTimespec(path, atime, mtime, cb)` / `utimensWithHandle(path, fd, atime, mtime, cb)` | Yes | Yes | The legacy variant transports signed milliseconds. Enhanced variants preserve seconds and nanoseconds exactly and safely enable `UTIME_NOW`/`UTIME_OMIT`; the handle-aware variant supports null paths. |
 | `readlink(path, cb)` | Yes | Yes | Shared implementation; oversized targets are safely truncated and NUL-terminated to the caller-provided buffer. |
-| `chown(path, uid, gid, cb)` | Yes | Yes | Shared implementation; uid/gid behavior is covered on macOS. |
-| `chmod(path, mode, cb)` | Yes | Yes | Shared implementation; permission changes are covered on macOS. |
+| `chown(path, uid, gid, cb)` / `chownWithHandle(path, fd, uid, gid, cb)` | Yes | Yes | The enhanced variant receives the FUSE 3 file handle and supports null paths. |
+| `chmod(path, mode, cb)` / `chmodWithHandle(path, fd, mode, cb)` | Yes | Yes | The enhanced variant receives the FUSE 3 file handle and supports null paths. |
 | `mknod(path, mode, dev, cb)` | Yes | Yes | Shared implementation; useful node types vary by host policy. |
 | `setxattr(path, name, value, position, flags, cb)` | Yes | Yes | macOS native signature includes `position`; Linux supplies position `0`. JavaScript receives a request-owned copy rather than borrowed kernel memory. |
 | `getxattr(path, name, position, cb)` | Yes | Yes | Callback returns a `Buffer`; validated bytes are copied into the native request only on completion. Round trips, listing, removal, and resource forks are covered. |
@@ -40,7 +40,7 @@ The native layer targets the FUSE 3.1 high-level API
 | `releasedir(path, fd, cb)` | Yes | Yes | Shared implementation. |
 | `create(path, mode, cb)` / `createWithFlags(path, mode, flags, cb)` | Yes | Yes | Legacy mode is unchanged. The mutually exclusive enhanced variant also receives the original open flags; both accept enriched file-info results. |
 | `unlink(path, cb)` | Yes | Yes | Shared implementation; deletion while an open handle survives is covered on macOS. |
-| `rename(src, dest, cb)` | Yes | Yes | Standard rename only; macFUSE's optional `renamex` flags are not exposed. |
+| `rename(src, dest, cb)` / `renameWithFlags(src, dest, flags, cb)` | Yes | Yes | The legacy callback accepts unflagged renames only. The enhanced variant preserves FUSE 3 rename flags instead of silently discarding them. |
 | `link(src, dest, cb)` | Yes | Yes | Shared implementation. |
 | `symlink(src, dest, cb)` | Yes | Yes | Shared implementation. |
 | `mkdir(path, mode, cb)` | Yes | Yes | Shared implementation. |
@@ -50,10 +50,13 @@ The native layer targets the FUSE 3.1 high-level API
 | `flock(path, fd, operation, cb)` | Yes | Yes | Shared BSD whole-file locking implementation. |
 | `bmap(path, blockSize, index, cb)` | Yes | Yes | Lossless block-index transport for block-device-backed filesystems. |
 | `ioctl(path, fd, command, argument, flags, data, cb)` | Yes | Yes | Bounded request-owned payloads up to 1 MiB. Unsafe unrestricted retry/iovec requests return `EOPNOTSUPP`. |
-| `poll(path, fd, cb)` | Yes | Yes | Returns snapshot readiness and destroys the native poll handle once; delayed JavaScript notification handles are deliberately not retained. |
+| `poll(path, fd, cb)` / `pollWithHandle(path, fd, handle, cb)` | Yes | Yes | Legacy mode returns snapshot readiness. The enhanced variant safely retains an idempotent notification handle, supports delayed `notify()`, and closes every native handle during explicit close, finalization, or teardown. |
 | `writeBuffer(path, fd, buffer, length, position, cb)` | Yes | Yes | Implements `write_buf`; generic vectors are flattened into request-owned bytes before JavaScript runs. Mutually exclusive with `write`. |
 | `readBuffer(path, fd, length, position, cb)` | Yes | Yes | Implements `read_buf` with libfuse-compatible native ownership. Mutually exclusive with `read`. |
 | `fallocate(path, fd, mode, offset, length, cb)` | Yes | Yes | Shared implementation with signed, lossless 64-bit range transport. |
+| `copyFileRange(src, srcFd, srcOffset, dest, destFd, destOffset, length, flags, cb)` | Yes | Yes | FUSE 3 range copy with nullable paths and lossless handles/offsets. Result length is range-checked. |
+| `lseek(path, fd, offset, whence, cb)` | Yes | Yes | FUSE 3 seek with lossless offsets, including `SEEK_DATA` and `SEEK_HOLE`. |
+| Linux `statx` | Yes | Kernel fallback | Native high-level callback is compiled for libfuse 3.18+/SONAME 4; older Linux runtimes use the kernel's `getattr` fallback. |
 
 ### Deprecated FUSE callbacks
 
@@ -67,12 +70,12 @@ callbacks are intentionally represented by their modern equivalents:
 ### macFUSE-only callbacks not exposed
 
 macFUSE appends optional Darwin extensions to `struct fuse_operations`.
-They are deliberately outside the first milestone:
+They are deliberately outside the portable callback scope:
 
 | Callback | Typical purpose | Initial-release decision |
 | --- | --- | --- |
 | `monitor` | Finder/file watcher count changes | Defer; macFUSE-specific. |
-| `renamex` | macOS rename flags | Use standard `rename`; test Finder fallbacks. |
+| `renamex` | Legacy macOS extension flags | Portable FUSE 3 flags use `renameWithFlags`; the separate legacy extension is not registered. |
 | Darwin `statfs` ABI | Darwin `struct statfs` | Adapted to the portable JavaScript `statfs` result. |
 | `setvolname` | Change volume name | Use the `volname` mount option. |
 | `exchange` | Exchange two paths | Defer; unsupported on recent macOS versions. |
@@ -121,8 +124,8 @@ configurations before libfuse is invoked.
 | `name` | Source for `volname` | Rejected | Yes | Requires `displayFolder: true`. |
 | `onError` | JavaScript exception reporter | Yes | Yes | Receives operation exceptions and rejected promises before the request is completed with `EIO`. |
 | `maxConcurrency` | Fixed native request-worker count | Yes | Yes | Integer from 1 through 64; defaults to 4 and bounds threads, outstanding callbacks, and request memory. |
-| `nullPathOk` | `fuse_config.nullpath_ok` | Yes | Yes | Allows `null` paths for supported handle-based callbacks. |
-| `noPath` | `fuse_config.nullpath_ok` compatibility mapping | Yes | Yes | Retains the 1.x behavior; affected callbacks must accept a `null` path. |
+| `nullPathOk` | `fuse_config.nullpath_ok` | Yes | Yes | Allows `null` paths only when every configured affected operation has its handle-aware counterpart; invalid combinations are rejected in the constructor. |
+| `noPath` | `fuse_config.nullpath_ok` compatibility mapping | Yes | Yes | Retains the 1.x behavior and enforces the same handle-aware callback requirements as `nullPathOk`. |
 
 Historical native libfuse spellings are normalized before validation:
 `allow_other`, `allow_root`, `auto_unmount`, `default_permissions`,
@@ -149,7 +152,7 @@ macFUSE 5 defaults to its VFS/kernel-extension backend. Its public libfuse API
 also accepts `backend=fskit` on supported macOS versions. `fuse-napi` does not
 currently expose a dedicated backend option.
 
-The first milestone targets the VFS backend because it preserves the broadest
+The current implementation targets the VFS backend because it preserves the broadest
 FUSE behavior and accepts the inherited temporary mount points. Selecting
 FSKit later through macFUSE's public libfuse API would still avoid a direct
 FSKit implementation, but must be explicitly scoped and tested because
@@ -160,6 +163,19 @@ macFUSE documents these current differences:
 - most kernel-handled mount options are not implemented;
 - notification APIs are unavailable; and
 - performance is lower than the VFS backend.
+
+## Runtime compatibility
+
+Linux release packages contain ABI-specific Node.js 22/24/26 binaries for
+both libfuse SONAME 3 and SONAME 4. The loader prefers a local source build,
+then selects the modern SONAME 4 artifact when the runtime supports it, and
+falls back to SONAME 3. Missing shared libraries produce `EFUSEDEPENDENCY`
+with installation guidance.
+
+Every mount performs a runtime preflight. Linux checks `fusermount3`,
+`/dev/fuse`, the loaded libfuse version, and `fuse.conf` policy when required.
+macOS checks the macFUSE installation and the buffer-release capability used
+by its custom event loop. libfuse 3.10.3 is the supported minimum.
 
 ## Errno compatibility
 

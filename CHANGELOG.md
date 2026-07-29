@@ -5,6 +5,37 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
+### Added
+
+- Production runtime preflight through `Fuse.checkEnvironment()`, performed
+  automatically before mounts, with stable diagnostics for missing
+  `fusermount3`, inaccessible `/dev/fuse`, `fuse.conf` policy, unsupported
+  libfuse versions, and incompatible macFUSE buffer ownership.
+- Handle-aware metadata callbacks, FUSE 3 rename flags, delayed poll
+  notifications, `copy_file_range`, `lseek`, and native Linux `statx` support
+  when built with libfuse 3.18 or newer.
+- Deterministic option fuzzing, native static analysis, ASan/UBSan mount
+  integration, repeated-mount soak coverage, and a libfuse 3.18 modern-syscall
+  CI gate.
+
+### Changed
+
+- Linux release packages now ship separate Node.js ABI-specific prebuilds for
+  libfuse SONAME 3 and SONAME 4 on x64 and arm64. Local source builds retain
+  priority and missing runtime dependencies produce actionable errors.
+- `remember` mounts start and stop libfuse's inode-cache cleanup thread, while
+  null-path operation combinations are rejected unless a safe handle-aware
+  callback is configured.
+- Release artifacts include a CycloneDX SBOM, checksums, and GitHub build and
+  SBOM attestations.
+
+### Fixed
+
+- Native poll registrations now have thread-safe shared ownership across
+  in-flight callbacks, explicit JavaScript closure, and concurrent teardown.
+- FUSE 3 buffer, poll, worker, and inode-cache resources are released
+  deterministically during normal and failed teardown paths.
+
 ## 2.1.0 - 2026-07-29
 
 ### Changed

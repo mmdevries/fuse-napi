@@ -1,6 +1,7 @@
 const tape = require('tape')
 
 const { wrapMacFuseLoadError } = require('../lib/macfuse')
+const { loadNativeBinding } = require('../lib/native-binding')
 const { discover } = require('../scripts/fuse-config')
 
 tape('Linux dependency error is actionable', function (t) {
@@ -65,5 +66,87 @@ tape('macFUSE dynamic loader error is actionable', function (t) {
 tape('unrelated dynamic loader errors are preserved', function (t) {
   const cause = new Error('No native build was found')
   t.equal(wrapMacFuseLoadError(cause), cause)
+  t.end()
+})
+
+tape('Linux loader prefers a host-compatible local source build', function (t) {
+  const expected = { binding: 'source' }
+  let modernLoads = 0
+  const loaded = loadNativeBinding('/package', {
+    platform: 'linux',
+    arch: 'x64',
+    abi: '147',
+    exists: name => name === '/package/build/Release/fuse.node',
+    loadDefault: root => {
+      t.equal(root, '/package', 'the package root reaches node-gyp-build')
+      return expected
+    },
+    loadFile: () => {
+      modernLoads++
+    }
+  })
+
+  t.equal(loaded, expected, 'the source build is returned')
+  t.equal(modernLoads, 0, 'bundled artifacts do not override a source build')
+  t.end()
+})
+
+tape('Linux loader selects the libfuse SONAME 4 prebuild when available', function (t) {
+  const expected = { binding: 'fuse4' }
+  const loaded = loadNativeBinding('/package', {
+    platform: 'linux',
+    arch: 'arm64',
+    abi: '137',
+    exists: name => name.includes('linux-arm64-fuse4'),
+    loadDefault: () => {
+      t.fail('the baseline loader should not run')
+    },
+    loadFile: name => {
+      t.equal(
+        name,
+        '/package/prebuilds/linux-arm64-fuse4/fuse-napi.abi137.node',
+        'the exact ABI-specific modern prebuild is selected'
+      )
+      return expected
+    }
+  })
+
+  t.equal(loaded, expected, 'the modern binding is returned')
+  t.end()
+})
+
+tape('Linux loader falls back to SONAME 3 when the modern runtime is absent', function (t) {
+  const expected = { binding: 'fuse3' }
+  const loaded = loadNativeBinding('/package', {
+    platform: 'linux',
+    arch: 'x64',
+    abi: '127',
+    exists: name => name.includes('linux-x64-fuse4'),
+    loadFile: () => {
+      throw new Error('libfuse3.so.4: cannot open shared object file')
+    },
+    loadDefault: () => expected
+  })
+
+  t.equal(loaded, expected, 'the baseline binding is returned')
+  t.end()
+})
+
+tape('Linux loader reports a missing FUSE runtime actionably', function (t) {
+  try {
+    loadNativeBinding('/package', {
+      platform: 'linux',
+      arch: 'x64',
+      abi: '127',
+      exists: () => false,
+      loadDefault: () => {
+        throw new Error('libfuse3.so.3: cannot open shared object file')
+      }
+    })
+    t.fail('a missing runtime was accepted')
+  } catch (err) {
+    t.equal(err.code, 'EFUSEDEPENDENCY', 'the dependency failure has a stable code')
+    t.match(err.message, /sudo apt-get install fuse3/, 'the failure is actionable')
+  }
   t.end()
 })

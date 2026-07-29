@@ -5,17 +5,19 @@ const { execFile } = require('child_process')
 const { AsyncLocalStorage } = require('async_hooks')
 
 const Nanoresource = require('nanoresource')
-const loadBinding = require('node-gyp-build')
+const { checkEnvironment } = require('./lib/environment')
 const { wrapMacFuseLoadError } = require('./lib/macfuse')
+const { loadNativeBinding } = require('./lib/native-binding')
 const { validateFuse3Options } = require('./lib/fuse3-options')
 
 const IS_OSX = os.platform() === 'darwin'
 let binding
 try {
-  binding = loadBinding(__dirname)
+  binding = loadNativeBinding(__dirname)
 } catch (err) {
   throw IS_OSX ? wrapMacFuseLoadError(err) : err
 }
+const NATIVE_RUNTIME = Object.freeze(binding.fuse_native_runtime_info())
 
 const OSX_FOLDER_ICON = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericFolderIcon.icns'
 const HAS_FOLDER_ICON = IS_OSX && fs.existsSync(OSX_FOLDER_ICON)
@@ -30,6 +32,7 @@ const OPERATION_FLAG_NULL_PATH_OK = 1
 const OPERATION_FLAG_NO_PATH = 2
 const OPERATION_FLAG_UTIME_OMIT_OK = 4
 const OPERATION_FLAG_DIRECT_IO = 8
+const OPERATION_FLAG_POLL_HANDLE = 16
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER)
 const XATTR_NOT_FOUND = -(os.constants.errno.ENOATTR || os.constants.errno.ENODATA || 61)
 const EMPTY_INIT_CONFIG = new Uint32Array(7)
@@ -50,7 +53,12 @@ const ENHANCED_OPERATIONS = new Map([
   ['initWithConfig', binding.op_init],
   ['readdirPaged', binding.op_readdir],
   ['createWithFlags', binding.op_create],
-  ['utimensWithTimespec', binding.op_utimens]
+  ['utimensWithTimespec', binding.op_utimens],
+  ['utimensWithHandle', binding.op_utimens],
+  ['chownWithHandle', binding.op_chown],
+  ['chmodWithHandle', binding.op_chmod],
+  ['renameWithFlags', binding.op_rename],
+  ['pollWithHandle', binding.op_poll]
 ])
 
 const OpcodesAndDefaults = new Map([
@@ -198,6 +206,15 @@ const OpcodesAndDefaults = new Map([
   }],
   ['fallocate', {
     op: binding.op_fallocate
+  }],
+  ['copyFileRange', {
+    op: binding.op_copy_file_range,
+    nativeName: 'copy_file_range',
+    defaults: [new Uint32Array(2)]
+  }],
+  ['lseek', {
+    op: binding.op_lseek,
+    defaults: [new Uint32Array(2)]
   }]
 ])
 const KNOWN_OPERATIONS = new Set([...OpcodesAndDefaults.keys(), ...ENHANCED_OPERATIONS.keys()])
@@ -226,12 +243,68 @@ const KNOWN_OPTIONS = new Set([
   'maxConcurrency', 'nullPathOk', 'noPath', 'directIo'
 ])
 
+const pollHandleFinalizer = new FinalizationRegistry(state => {
+  if (state.closed) return
+  state.closed = true
+  try {
+    binding.fuse_native_close_poll(state.thread, state.id)
+  } catch {}
+})
+
+class PollHandle {
+  constructor (thread, id) {
+    this._state = { thread, id, closed: false }
+    pollHandleFinalizer.register(this, this._state, this)
+  }
+
+  get closed () {
+    return this._state.closed
+  }
+
+  notify () {
+    if (this._state.closed) return false
+    const notified = binding.fuse_native_notify_poll(this._state.thread, this._state.id)
+    if (!notified) this.close()
+    return notified
+  }
+
+  close () {
+    if (this._state.closed) return false
+    this._state.closed = true
+    pollHandleFinalizer.unregister(this)
+    return binding.fuse_native_close_poll(this._state.thread, this._state.id)
+  }
+}
+
 class Fuse extends Nanoresource {
   static validateOptions (opts = {}) {
     if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
       throw new TypeError('Options must be an object')
     }
     normalizeAndValidateOptions(opts)
+  }
+
+  static checkEnvironment (opts = {}, cb) {
+    if (typeof opts === 'function') {
+      cb = opts
+      opts = {}
+    }
+    let promise
+    try {
+      if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
+        throw new TypeError('Environment options must be an object')
+      }
+      const normalized = normalizeAndValidateOptions(opts)
+      promise = checkEnvironment(normalized, { nativeRuntime: NATIVE_RUNTIME })
+    } catch (error) {
+      promise = Promise.reject(error)
+    }
+
+    if (typeof cb !== 'function') return promise
+    promise.then(
+      report => process.nextTick(cb, null, report),
+      err => process.nextTick(cb, err)
+    )
   }
 
   constructor (mnt, ops = {}, opts = {}) {
@@ -266,12 +339,38 @@ class Fuse extends Nanoresource {
       ['init', 'initWithConfig'],
       ['readdir', 'readdirPaged'],
       ['create', 'createWithFlags'],
-      ['utimens', 'utimensWithTimespec'],
+      ['chown', 'chownWithHandle'],
+      ['chmod', 'chmodWithHandle'],
+      ['rename', 'renameWithFlags'],
+      ['poll', 'pollWithHandle'],
       ['read', 'readBuffer'],
       ['write', 'writeBuffer']
     ]) {
       if (ops[legacy] && ops[enhanced]) {
         throw new TypeError(`Operations ${JSON.stringify(legacy)} and ${JSON.stringify(enhanced)} are mutually exclusive`)
+      }
+    }
+    const utimensVariants = ['utimens', 'utimensWithTimespec', 'utimensWithHandle']
+      .filter(name => ops[name] !== undefined)
+    if (utimensVariants.length > 1) {
+      throw new TypeError(`Operations ${utimensVariants.map(JSON.stringify).join(', ')} are mutually exclusive`)
+    }
+    if (opts.nullPathOk || opts.noPath) {
+      const nullPathOption = opts.nullPathOk ? 'nullPathOk' : 'noPath'
+      for (const [pathOnly, handleAware] of [
+        ['getattr', 'fgetattr'],
+        ['truncate', 'ftruncate'],
+        ['chown', 'chownWithHandle'],
+        ['chmod', 'chmodWithHandle'],
+        ['utimens', 'utimensWithHandle'],
+        ['utimensWithTimespec', 'utimensWithHandle']
+      ]) {
+        if (ops[pathOnly] && !ops[handleAware]) {
+          throw new TypeError(
+            `Option ${JSON.stringify(nullPathOption)} requires operation ${JSON.stringify(handleAware)} ` +
+            `when ${JSON.stringify(pathOnly)} is implemented`
+          )
+        }
       }
     }
 
@@ -291,8 +390,11 @@ class Fuse extends Nanoresource {
     this._operationFlags =
       (this.opts.nullPathOk ? OPERATION_FLAG_NULL_PATH_OK : 0) |
       (this.opts.noPath ? OPERATION_FLAG_NO_PATH : 0) |
-      (this.ops.utimensWithTimespec ? OPERATION_FLAG_UTIME_OMIT_OK : 0) |
-      (this.opts.directIo ? OPERATION_FLAG_DIRECT_IO : 0)
+      ((this.ops.utimensWithTimespec || this.ops.utimensWithHandle)
+        ? OPERATION_FLAG_UTIME_OMIT_OK
+        : 0) |
+      (this.opts.directIo ? OPERATION_FLAG_DIRECT_IO : 0) |
+      (this.ops.pollWithHandle ? OPERATION_FLAG_POLL_HANDLE : 0)
 
     this._force = !!this.opts.force
     this._mkdir = !!this.opts.mkdir
@@ -488,59 +590,66 @@ class Fuse extends Nanoresource {
         err.code = 'EFUSEMOUNTBUSY'
         return process.nextTick(cb, err)
       }
-      self._thread = Buffer.alloc(binding.sizeof_fuse_thread_t)
       self._openCallback = cb
-
-      let opts
-      let implemented
-      try {
-        opts = self._fuseOptions()
-        implemented = self._getImplementedArray()
-      } catch (err) {
-        return self._completeOpen(err)
-      }
-
-      return fs.stat(self.mnt, (err, stat) => {
-        if (err && err.code !== 'ENOENT') return self._completeOpen(err)
-        if (err) {
-          if (!self._mkdir) return self._completeOpen(new Error('Mountpoint does not exist'))
-          return fs.mkdir(self.mnt, { recursive: true }, err => {
-            if (err) return self._completeOpen(err)
-            fs.stat(self.mnt, (err, stat) => {
-              if (err) return self._completeOpen(err)
-              return onexists(stat)
-            })
-          })
-        }
-        if (!stat.isDirectory()) return self._completeOpen(new Error('Mountpoint is not a directory'))
-        return onexists(stat)
+      return Fuse.checkEnvironment(self.opts, err => {
+        if (err) return self._completeOpen(err)
+        return beginOpen()
       })
 
-      function onexists (stat) {
-        fs.stat(path.join(self.mnt, '..'), (parentErr, parent) => {
-          if (parentErr) return self._completeOpen(parentErr)
-          if (parent.dev !== stat.dev) return self._completeOpen(new Error('Mountpoint in use'))
-          self._mountpointDev = stat.dev
-          self._startMountTimer()
-          self._nativeMountPending = true
-          try {
-            binding.fuse_native_mount(
-              self.mnt,
-              opts,
-              self._thread,
-              self,
-              self._handlers,
-              implemented,
-              self.maxConcurrency,
-              self._operationFlags,
-              self._nativeLoopExited.bind(self),
-              self._nativeMountComplete.bind(self)
-            )
-          } catch (err) {
-            self._nativeMountPending = false
-            return self._completeOpen(err)
+      function beginOpen () {
+        self._thread = Buffer.alloc(binding.sizeof_fuse_thread_t)
+
+        let opts
+        let implemented
+        try {
+          opts = self._fuseOptions()
+          implemented = self._getImplementedArray()
+        } catch (err) {
+          return self._completeOpen(err)
+        }
+
+        return fs.stat(self.mnt, (err, stat) => {
+          if (err && err.code !== 'ENOENT') return self._completeOpen(err)
+          if (err) {
+            if (!self._mkdir) return self._completeOpen(new Error('Mountpoint does not exist'))
+            return fs.mkdir(self.mnt, { recursive: true }, err => {
+              if (err) return self._completeOpen(err)
+              fs.stat(self.mnt, (err, stat) => {
+                if (err) return self._completeOpen(err)
+                return onexists(stat)
+              })
+            })
           }
+          if (!stat.isDirectory()) return self._completeOpen(new Error('Mountpoint is not a directory'))
+          return onexists(stat)
         })
+
+        function onexists (stat) {
+          fs.stat(path.join(self.mnt, '..'), (parentErr, parent) => {
+            if (parentErr) return self._completeOpen(parentErr)
+            if (parent.dev !== stat.dev) return self._completeOpen(new Error('Mountpoint in use'))
+            self._mountpointDev = stat.dev
+            self._startMountTimer()
+            self._nativeMountPending = true
+            try {
+              binding.fuse_native_mount(
+                self.mnt,
+                opts,
+                self._thread,
+                self,
+                self._handlers,
+                implemented,
+                self.maxConcurrency,
+                self._operationFlags,
+                self._nativeLoopExited.bind(self),
+                self._nativeMountComplete.bind(self)
+              )
+            } catch (err) {
+              self._nativeMountPending = false
+              return self._completeOpen(err)
+            }
+          })
+        }
       }
     }
   }
@@ -868,7 +977,8 @@ class Fuse extends Nanoresource {
     atimeNanoseconds,
     mtimeSecondsLow,
     mtimeSecondsHigh,
-    mtimeNanoseconds
+    mtimeNanoseconds,
+    fd
   ) {
     const atime = decodeTimespec(atimeSecondsLow, atimeSecondsHigh, atimeNanoseconds)
     const mtime = decodeTimespec(mtimeSecondsLow, mtimeSecondsHigh, mtimeNanoseconds)
@@ -877,6 +987,9 @@ class Fuse extends Nanoresource {
     }
     if (this.ops.utimensWithTimespec) {
       return this.ops.utimensWithTimespec(path, atime, mtime, complete)
+    }
+    if (this.ops.utimensWithHandle) {
+      return this.ops.utimensWithHandle(path, fd, atime, mtime, complete)
     }
     if (atime.nanoseconds === UTIME_NOW || atime.nanoseconds === UTIME_OMIT ||
         mtime.nanoseconds === UTIME_NOW || mtime.nanoseconds === UTIME_OMIT) {
@@ -1037,13 +1150,19 @@ class Fuse extends Nanoresource {
     })
   }
 
-  _op_chown (signal, path, uid, gid) {
+  _op_chown (signal, path, uid, gid, fd) {
+    if (this.ops.chownWithHandle) {
+      return this.ops.chownWithHandle(path, fd, uid, gid, err => signal(err))
+    }
     return this.ops.chown(path, uid, gid, err => {
       return signal(err)
     })
   }
 
-  _op_chmod (signal, path, mode) {
+  _op_chmod (signal, path, mode, fd) {
+    if (this.ops.chmodWithHandle) {
+      return this.ops.chmodWithHandle(path, fd, mode, err => signal(err))
+    }
     return this.ops.chmod(path, mode, err => {
       return signal(err)
     })
@@ -1061,7 +1180,11 @@ class Fuse extends Nanoresource {
     })
   }
 
-  _op_rename (signal, src, dest) {
+  _op_rename (signal, src, dest, flags) {
+    if (this.ops.renameWithFlags) {
+      return this.ops.renameWithFlags(src, dest, flags, err => signal(err))
+    }
+    if (flags !== 0) return signal(Fuse.EOPNOTSUPP)
     return this.ops.rename(src, dest, err => {
       return signal(err)
     })
@@ -1143,13 +1266,21 @@ class Fuse extends Nanoresource {
     })
   }
 
-  _op_poll (signal, path, fd) {
-    return this.ops.poll(path, fd, (err, events) => {
+  _op_poll (signal, path, fd, pollId) {
+    const pollHandle = this.ops.pollWithHandle && pollId
+      ? new PollHandle(this._thread, pollId)
+      : null
+    const complete = (err, events) => {
+      if (err && pollHandle) pollHandle.close()
       if (err) return signal(err)
       return this._respond(signal, 'poll', [], () => {
         return signal(0, toUint32(events ?? 0, 'poll events'))
       })
-    })
+    }
+    if (this.ops.pollWithHandle) {
+      return this.ops.pollWithHandle(path, fd, pollHandle, complete)
+    }
+    return this.ops.poll(path, fd, complete)
   }
 
   _op_write_buf (signal, path, fd, buffer, length, offsetLow, offsetHigh) {
@@ -1206,6 +1337,61 @@ class Fuse extends Nanoresource {
       getSignedDoubleArg(offsetLow, offsetHigh),
       getSignedDoubleArg(lengthLow, lengthHigh),
       err => signal(err)
+    )
+  }
+
+  _op_copy_file_range (
+    signal,
+    pathIn,
+    fdIn,
+    offsetInLow,
+    offsetInHigh,
+    pathOut,
+    fdOut,
+    offsetOutLow,
+    offsetOutHigh,
+    length,
+    flags
+  ) {
+    return this.ops.copyFileRange(
+      pathIn,
+      fdIn,
+      getSignedDoubleArg(offsetInLow, offsetInHigh),
+      pathOut,
+      fdOut,
+      getSignedDoubleArg(offsetOutLow, offsetOutHigh),
+      length,
+      flags,
+      result => {
+        return this._respond(signal, 'copyFileRange', [], () => {
+          if (typeof result === 'number' && result < 0) {
+            return signal(normalizeResult(result, 'copyFileRange'), new Uint32Array(2))
+          }
+          const copied = toInt64(result, 'copyFileRange result')
+          const requested = toUint64(length, 'copyFileRange length')
+          if (copied < 0n || BigInt.asUintN(64, copied) > requested) {
+            throw new RangeError('copyFileRange result must be between zero and the requested length')
+          }
+          return signal(0, encodeInt64(copied, 'copyFileRange result'))
+        })
+      }
+    )
+  }
+
+  _op_lseek (signal, path, fd, offsetLow, offsetHigh, whence) {
+    return this.ops.lseek(
+      path,
+      fd,
+      getSignedDoubleArg(offsetLow, offsetHigh),
+      whence,
+      (err, offset) => {
+        if (err) return signal(err, new Uint32Array(2))
+        return this._respond(signal, 'lseek', [], () => {
+          const result = toInt64(offset, 'lseek result')
+          if (result < 0n) throw new RangeError('lseek result must not be negative')
+          return signal(0, encodeInt64(result, 'lseek result'))
+        })
+      }
     )
   }
 
@@ -1472,7 +1658,9 @@ function decodeTimespec (secondsLow, secondsHigh, nanoseconds) {
 
 function timespecToMilliseconds (timespec) {
   if (timespec.nanoseconds === UTIME_NOW || timespec.nanoseconds === UTIME_OMIT) {
-    throw new RangeError('UTIME_NOW and UTIME_OMIT require utimensWithTimespec')
+    throw new RangeError(
+      'UTIME_NOW and UTIME_OMIT require utimensWithTimespec or utimensWithHandle'
+    )
   }
   const seconds = typeof timespec.seconds === 'bigint'
     ? timespec.seconds
@@ -1690,7 +1878,7 @@ function normalizeResult (result, operation) {
   if (result === null || result === undefined) return 0
   if (!Number.isInteger(result) || result < MIN_INT32 || result > MAX_INT32) return Fuse.EIO
   if (result > 0 && operation !== 'read' && operation !== 'write' &&
-      operation !== 'writeBuffer' &&
+      operation !== 'writeBuffer' && operation !== 'copyFileRange' &&
       operation !== 'getxattr' && operation !== 'listxattr') {
     return Fuse.EIO
   }
@@ -1776,6 +1964,12 @@ function encodeLock (lock) {
     throw new RangeError('lock.pid must be a signed 32-bit integer')
   }
   encoded[6] = pid >>> 0
+  return encoded
+}
+
+function encodeInt64 (value, name) {
+  const encoded = new Uint32Array(2)
+  setInt64(encoded, 0, value, name)
   return encoded
 }
 

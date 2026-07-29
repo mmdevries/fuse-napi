@@ -20,7 +20,8 @@ dependency.
 
 The addon dynamically links an external FUSE 3 library:
 
-- Linux uses the system `libfuse3.so.3`.
+- Linux supports both the long-lived `libfuse3.so.3` ABI and the
+  `libfuse3.so.4` ABI introduced by libfuse 3.18.
 - macOS uses the `libfuse3` runtime installed by
   [macFUSE](https://macfuse.github.io/).
 
@@ -71,10 +72,13 @@ No privileged package configuration command is installed or run. Host FUSE
 installation and system-extension approval remain explicit administrator
 tasks.
 
-`fuse-napi` uses macFUSE's public libfuse 3 API and its default
-VFS backend. It does not implement FSKit directly. If the headers, dylib, or
-runtime are unavailable, installation/loading fails with an actionable
-macFUSE error.
+`fuse-napi` uses macFUSE's libfuse 3 compatibility API and its default VFS
+backend. The public custom-loop API returns transport-owned buffers, while
+current macFUSE releases expose the matching release function only as a
+runtime symbol. `fuse-napi` resolves and verifies that capability before every
+mount, so an incompatible macFUSE update fails safely with `EMACFUSEABI`.
+It does not implement FSKit directly. If the dylib or runtime is unavailable,
+installation/loading fails with an actionable macFUSE error.
 
 ## Development
 
@@ -86,11 +90,15 @@ npm test
 `npm test` performs real mount operations and therefore needs `/dev/fuse` plus
 mount privileges on Linux, or an installed and approved macFUSE extension on
 macOS. `npm run test:unit` runs only the non-mounting dependency, errno,
-lifecycle, and option tests.
+lifecycle, and option tests. `npm run test:fuzz` deterministically fuzzes the
+public validation boundary, and `npm run test:soak` repeatedly mounts,
+exercises, and unmounts the filesystem.
 
-The GitHub `CI` workflow starts only through **Actions → CI → Run workflow**.
-The manually triggered prebuild workflow can also invoke the same CI matrix
-through its reusable `workflow_call` entry point.
+The GitHub `CI` workflow runs for pushes and pull requests to `main` and `2.0`,
+and remains manually and programmatically reusable. In addition to the
+platform/Node.js matrix, it builds against libfuse 3.18, exercises modern
+syscalls, runs static analysis, deterministic fuzzing, ASan/UBSan, and a mount
+soak test.
 
 The test suite is green on Linux arm64 with libfuse 3.10.3 and on Apple Silicon
 with macFUSE 5.3.3. Hosted CI is configured to build both macOS architectures
@@ -206,6 +214,14 @@ and the historical libfuse name are accepted when the underlying FUSE 3
 concept still exists (for example, `directIo`/`direct_io` and
 `allowOther`/`allow_other`). Inputs are normalized to the JavaScript name, and
 conflicting aliases are rejected.
+
+`await Fuse.checkEnvironment(options)` performs the production runtime
+preflight without mounting. It verifies the loaded libfuse version and
+capabilities and, on Linux, `fusermount3`, read/write access to `/dev/fuse`,
+and `user_allow_other` when `allowOther` or `allowRoot` is requested. Mounting
+performs this check automatically. Failures have stable codes such as
+`EFUSEHELPER`, `EFUSEDEVICE`, `EFUSEALLOWOTHER`, `EFUSEVERSION`, and
+`EMACFUSEABI`.
 
 The native request loop uses exactly `maxConcurrency` workers instead of
 libfuse's dynamically growing multithreaded loop. This bounds native
@@ -500,6 +516,22 @@ be `Fuse.UTIME_NOW` or `Fuse.UTIME_OMIT`; the native
 `flag_utime_omit_ok` bit is enabled only for this variant. Stat timestamps may
 also be returned in this timespec form.
 
+#### `ops.utimensWithHandle(path, fd, atime, mtime, cb)`
+
+Handle-aware alternative to both `utimens` variants. It receives a nullable
+path, the open file handle, and the same lossless timespec values as
+`utimensWithTimespec`. Use this variant when `nullPathOk` is enabled.
+
+#### `ops.chownWithHandle(path, fd, uid, gid, cb)`
+
+Handle-aware alternative to `chown`. The path can be `null` when
+`nullPathOk` is enabled.
+
+#### `ops.chmodWithHandle(path, fd, mode, cb)`
+
+Handle-aware alternative to `chmod`. The path can be `null` when
+`nullPathOk` is enabled.
+
 #### `ops.destroy(cb)`
 
 Called exactly once when an initialized filesystem exits through an orderly
@@ -533,9 +565,15 @@ Payloads larger than 1 MiB are rejected before entering JavaScript.
 
 #### `ops.poll(path, fd, cb)`
 
-Returns the current readiness event mask. The native poll handle is always
-destroyed exactly once. This API intentionally provides snapshot readiness;
-it does not retain a native handle for later JavaScript notifications.
+Returns a snapshot readiness event mask.
+
+#### `ops.pollWithHandle(path, fd, handle, cb)`
+
+Mutually exclusive, notification-capable alternative to `poll`. Return the
+initial readiness mask through `cb`. When `handle` is non-null, call
+`handle.notify()` after readiness changes so the kernel re-evaluates the
+poll, then call `handle.close()` when no further notification is needed.
+Handles are idempotent and are closed automatically during teardown.
 
 #### `ops.writeBuffer(path, fd, buffer, length, position, cb)`
 
@@ -553,13 +591,30 @@ with the ownership rules required by libfuse.
 
 Allocates a signed 64-bit byte range for an open file.
 
+#### `ops.copyFileRange(src, srcFd, srcOffset, dest, destFd, destOffset, length, flags, cb)`
+
+Implements FUSE 3 `copy_file_range`. Return the copied byte count directly to
+`cb`; negative values are treated as errno results. Paths can be `null` for
+handle-based requests, and all offsets and handles retain 64-bit precision.
+
+#### `ops.lseek(path, fd, offset, whence, cb)`
+
+Implements FUSE 3 `lseek`, including `SEEK_DATA` and `SEEK_HOLE`. Return
+`cb(0, resultingOffset)`.
+
 #### `ops.unlink(path, cb)`
 
 Called when a file is being unlinked.
 
 #### `ops.rename(src, dest, cb)`
 
-Called when a file is being renamed.
+Called for an unflagged rename. A flagged request is rejected with
+`EOPNOTSUPP` rather than silently losing its semantics.
+
+#### `ops.renameWithFlags(src, dest, flags, cb)`
+
+Mutually exclusive alternative to `rename` that receives the native FUSE 3
+rename flags, including Linux `RENAME_NOREPLACE`.
 
 #### `ops.link(src, dest, cb)`
 

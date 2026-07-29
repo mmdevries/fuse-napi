@@ -34,16 +34,31 @@ if (/not yet published to npm/i.test(readme)) {
 }
 
 if (verifyArtifacts) {
-  for (const target of ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']) {
-    const prebuild = path.join(root, 'prebuilds', target, 'fuse-napi.node')
-    let stat
-    try {
-      stat = fs.statSync(prebuild)
-    } catch {
-      fail(`Missing release prebuild: ${path.relative(root, prebuild)}`)
-    }
-    if (!stat.isFile() || stat.size === 0) {
-      fail(`Release prebuild is empty or not a file: ${path.relative(root, prebuild)}`)
+  const abiFiles = [
+    'fuse-napi.abi127.node',
+    'fuse-napi.abi137.node',
+    'fuse-napi.abi147.node'
+  ]
+  const targets = [
+    'linux-x64',
+    'linux-arm64',
+    'darwin-x64',
+    'darwin-arm64',
+    'linux-x64-fuse4',
+    'linux-arm64-fuse4'
+  ]
+  for (const target of targets) {
+    for (const abiFile of abiFiles) {
+      const prebuild = path.join(root, 'prebuilds', target, abiFile)
+      let stat
+      try {
+        stat = fs.statSync(prebuild)
+      } catch {
+        fail(`Missing release prebuild: ${path.relative(root, prebuild)}`)
+      }
+      if (!stat.isFile() || stat.size === 0) {
+        fail(`Release prebuild is empty or not a file: ${path.relative(root, prebuild)}`)
+      }
     }
   }
 }

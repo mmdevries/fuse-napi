@@ -73,6 +73,21 @@ tape('constructor and mount option inputs are validated', function (t) {
     /mutually exclusive/,
     'write and writeBuffer cannot compete for the same FUSE callback'
   )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-null-getattr', { getattr () {} }, { nullPathOk: true }),
+    /nullPathOk.*fgetattr/,
+    'nullPathOk requires the handle-aware getattr contract'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-null-chown', { chown () {} }, { nullPathOk: true }),
+    /nullPathOk.*chownWithHandle/,
+    'nullPathOk requires the handle-aware metadata contract'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-nopath-truncate', { truncate () {} }, { noPath: true }),
+    /noPath.*ftruncate/,
+    'noPath enforces the same handle-aware contract'
+  )
 
   for (const value of ['name,allow_other', 'name\\allow_other', 'name\nallow_other', 'name\0allow_other']) {
     t.throws(
@@ -126,6 +141,7 @@ tape('native mount startup is asynchronous, bounded, and cancellable', function 
   const originalStat = require('fs').stat
   const originalMount = binding.fuse_native_mount
   const originalCancel = binding.fuse_native_cancel_mount
+  const originalCheckEnvironment = Fuse.checkEnvironment
   const filesystem = require('fs')
   let mountArguments
   let cancellations = 0
@@ -142,9 +158,12 @@ tape('native mount startup is asynchronous, bounded, and cancellable', function 
   binding.fuse_native_cancel_mount = function () {
     cancellations++
   }
+  Fuse.checkEnvironment = function (_, cb) {
+    process.nextTick(cb, null, { ok: true, platform: process.platform })
+  }
 
   const fuse = new Fuse('/tmp/fuse-napi-async-mount', {
-    utimensWithTimespec () {}
+    utimensWithHandle () {}
   }, {
     timeout: { default: false, init: 20 },
     maxConcurrency: 3,
@@ -157,6 +176,7 @@ tape('native mount startup is asynchronous, bounded, and cancellable', function 
     filesystem.stat = originalStat
     binding.fuse_native_mount = originalMount
     binding.fuse_native_cancel_mount = originalCancel
+    Fuse.checkEnvironment = originalCheckEnvironment
 
     t.ok(err, 'startup deadline completes even while native mount work is pending')
     t.equal(cancellations, 1, 'pending native mount receives one cancellation request')
@@ -565,6 +585,119 @@ tape('timespec input preserves nanoseconds and special utimens values', function
     0,
     0
   )
+  t.end()
+})
+
+tape('FUSE 3 handle-aware metadata and modern operation contracts are lossless', function (t) {
+  const calls = []
+  const originalNotifyPoll = binding.fuse_native_notify_poll
+  const originalClosePoll = binding.fuse_native_close_poll
+  binding.fuse_native_notify_poll = (thread, id) => {
+    calls.push(['notifyPoll', thread, id])
+    return true
+  }
+  binding.fuse_native_close_poll = (thread, id) => {
+    calls.push(['closePoll', thread, id])
+    return true
+  }
+
+  const fuse = new Fuse('/tmp/fuse-napi-modern-operations', {
+    utimensWithHandle (name, fd, atime, mtime, cb) {
+      calls.push(['utimensWithHandle', name, fd, atime, mtime])
+      cb(0)
+    },
+    chownWithHandle (name, fd, uid, gid, cb) {
+      calls.push(['chownWithHandle', name, fd, uid, gid])
+      cb(0)
+    },
+    chmodWithHandle (name, fd, mode, cb) {
+      calls.push(['chmodWithHandle', name, fd, mode])
+      cb(0)
+    },
+    renameWithFlags (source, destination, flags, cb) {
+      calls.push(['renameWithFlags', source, destination, flags])
+      cb(0)
+    },
+    pollWithHandle (name, fd, handle, cb) {
+      calls.push(['pollWithHandle', name, fd, handle])
+      t.equal(handle.notify(), true, 'a retained poll handle can notify the kernel')
+      cb(0, 0x45)
+      t.equal(handle.close(), true, 'a retained poll handle can be closed explicitly')
+    },
+    copyFileRange (
+      source,
+      sourceFd,
+      sourceOffset,
+      destination,
+      destinationFd,
+      destinationOffset,
+      length,
+      flags,
+      cb
+    ) {
+      calls.push([
+        'copyFileRange',
+        source,
+        sourceFd,
+        sourceOffset,
+        destination,
+        destinationFd,
+        destinationOffset,
+        length,
+        flags
+      ])
+      cb(7n)
+    },
+    lseek (name, fd, offset, whence, cb) {
+      calls.push(['lseek', name, fd, offset, whence])
+      cb(0, 0x20000000000001n)
+    }
+  })
+  fuse._thread = Buffer.alloc(16)
+
+  fuse._op_utimens(
+    err => t.equal(err, 0, 'handle-aware utimens succeeds'),
+    null,
+    1,
+    0,
+    2,
+    3,
+    0,
+    4,
+    0x20000000000001n
+  )
+  fuse._op_chown(err => t.equal(err, 0, 'handle-aware chown succeeds'),
+    null, 501, 20, 0x20000000000001n)
+  fuse._op_chmod(err => t.equal(err, 0, 'handle-aware chmod succeeds'),
+    null, 0o640, 0x20000000000001n)
+  fuse._op_rename(err => t.equal(err, 0, 'flag-aware rename succeeds'),
+    '/old', '/new', 2)
+  fuse._op_poll((err, events) => {
+    t.deepEqual([err, events], [0, 0x45], 'delayed poll reports its initial events')
+  }, null, 0x20000000000001n, 42)
+  fuse._op_copy_file_range(function (err, copied) {
+    t.equal(err, 0, 'copy_file_range succeeds')
+    t.equal(joinInt64(copied, 0), 7n, 'copy_file_range preserves its result')
+  }, null, 11, 0xffffffff, 0xffffffff, null, 12, 2, 0, 9, 1)
+  fuse._op_lseek(function (err, offset) {
+    t.equal(err, 0, 'lseek succeeds')
+    t.equal(joinInt64(offset, 0), 0x20000000000001n, 'lseek preserves a large offset')
+  }, null, 13, 0xffffffff, 0xffffffff, 4)
+
+  const utimens = calls.find(call => call[0] === 'utimensWithHandle')
+  t.equal(utimens[1], null, 'utimens receives the null path')
+  t.equal(utimens[2], 0x20000000000001n, 'utimens receives the file handle')
+  t.deepEqual(utimens[3], { seconds: 1, nanoseconds: 2 }, 'utimens receives exact atime')
+  const copy = calls.find(call => call[0] === 'copyFileRange')
+  t.equal(copy[3], -1, 'copy_file_range preserves a signed source offset')
+  t.equal(copy[6], 2, 'copy_file_range preserves its destination offset')
+  const seek = calls.find(call => call[0] === 'lseek')
+  t.equal(seek[3], -1, 'lseek preserves a signed input offset')
+  t.equal(calls.filter(call => call[0] === 'notifyPoll').length, 1, 'poll notifies once')
+  t.equal(calls.filter(call => call[0] === 'closePoll').length, 1, 'poll closes once')
+
+  binding.fuse_native_notify_poll = originalNotifyPoll
+  binding.fuse_native_close_poll = originalClosePoll
   t.end()
 })
 

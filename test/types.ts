@@ -70,6 +70,36 @@ new Fuse(mountpoint, {
     void fd
     void command
     cb(0, { ...lock, pid: 0 })
+  },
+  chownWithHandle (path, fd, uid, gid, cb) {
+    void path
+    void fd
+    void uid
+    void gid
+    cb(0)
+  },
+  chmodWithHandle (path, fd, mode, cb) {
+    void path
+    void fd
+    void mode
+    cb(0)
+  },
+  renameWithFlags (source, destination, flags, cb) {
+    void source
+    void destination
+    void flags
+    cb(0)
+  },
+  pollWithHandle (path, fd, handle, cb) {
+    void path
+    void fd
+    if (handle) {
+      const notified: boolean = handle.notify()
+      const closed: boolean = handle.close()
+      void notified
+      void closed
+    }
+    cb(0, 0)
   }
 }, {
   maxConcurrency: 4,
@@ -137,6 +167,46 @@ const invalidUtimens: Fuse.OPERATIONS = {
   }
 }
 
+// @ts-expect-error chown variants are mutually exclusive
+const invalidChown: Fuse.OPERATIONS = {
+  chown (path, uid, gid, cb) {
+    cb(0)
+  },
+  chownWithHandle (path, fd, uid, gid, cb) {
+    cb(0)
+  }
+}
+
+// @ts-expect-error chmod variants are mutually exclusive
+const invalidChmod: Fuse.OPERATIONS = {
+  chmod (path, mode, cb) {
+    cb(0)
+  },
+  chmodWithHandle (path, fd, mode, cb) {
+    cb(0)
+  }
+}
+
+// @ts-expect-error rename variants are mutually exclusive
+const invalidRename: Fuse.OPERATIONS = {
+  rename (source, destination, cb) {
+    cb(0)
+  },
+  renameWithFlags (source, destination, flags, cb) {
+    cb(0)
+  }
+}
+
+// @ts-expect-error poll variants are mutually exclusive
+const invalidPoll: Fuse.OPERATIONS = {
+  poll (path, fd, cb) {
+    cb(0, 0)
+  },
+  pollWithHandle (path, fd, handle, cb) {
+    cb(0, 0)
+  }
+}
+
 const instance = new Fuse(mountpoint)
 const nativeOptionAliases: Fuse.OPTIONS = {
   allow_other: true,
@@ -173,5 +243,9 @@ void invalidReaddir
 void invalidCreate
 void invalidRead
 void invalidUtimens
+void invalidChown
+void invalidChmod
+void invalidRename
+void invalidPoll
 void invalidInternalOption
 void invalidRemovedOption

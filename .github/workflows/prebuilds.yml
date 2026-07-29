@@ -1,4 +1,4 @@
-name: Node-API prebuilds
+name: ABI-specific Node.js prebuilds
 
 on:
   workflow_dispatch:
@@ -22,7 +22,7 @@ jobs:
           node-version: 22
           package-manager-cache: false
 
-      - name: Verify package, lockfile, README, and release tag
+      - name: Verify package, lockfile, README, and release tag when present
         run: node scripts/verify-release.js
 
   ci:
@@ -62,7 +62,7 @@ jobs:
           npm audit --omit=dev
 
   build:
-    name: Build ${{ matrix.platform }}-${{ matrix.arch }}
+    name: Build ${{ matrix.platform }}-${{ matrix.arch }} / Node.js ${{ matrix.node-version }}
     needs:
       - validate
       - ci
@@ -77,15 +77,63 @@ jobs:
           - runner: ubuntu-24.04
             platform: linux
             arch: x64
+            node-version: 22
+            abi: 127
           - runner: ubuntu-24.04-arm
             platform: linux
             arch: arm64
+            node-version: 22
+            abi: 127
           - runner: macos-15-intel
             platform: darwin
             arch: x64
+            node-version: 22
+            abi: 127
           - runner: macos-15
             platform: darwin
             arch: arm64
+            node-version: 22
+            abi: 127
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            node-version: 24
+            abi: 137
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            node-version: 24
+            abi: 137
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+            node-version: 24
+            abi: 137
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+            node-version: 24
+            abi: 137
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            node-version: 26
+            abi: 147
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            node-version: 26
+            abi: 147
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+            node-version: 26
+            abi: 147
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+            node-version: 26
+            abi: 147
 
     steps:
       - name: Check out repository
@@ -94,21 +142,21 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           package-manager-cache: false
 
-      - name: Build Linux Node-API prebuild on the glibc 2.31 baseline
+      - name: Build Linux ABI-specific prebuild on the glibc 2.31 baseline
         if: matrix.platform == 'linux'
         run: |
           docker run --rm \
             --volume "$PWD:/workspace" \
             --workdir /workspace \
-            node:22-bullseye \
+            node:${{ matrix.node-version }}-bullseye \
             bash -euxo pipefail -c '
               apt-get update
               apt-get install --yes libfuse3-dev fuse3 pkg-config
               npm ci --ignore-scripts
-              npm run prebuild
+              npm run prebuild -- --target ${{ matrix.node-version }}.0.0
               node -e "require(\"node-gyp-build\")(\".\")"
             '
 
@@ -122,15 +170,15 @@ jobs:
         if: matrix.platform == 'darwin'
         run: npm ci --ignore-scripts
 
-      - name: Build macOS Node-API prebuild
+      - name: Build macOS ABI-specific prebuild
         if: matrix.platform == 'darwin'
         env:
           MACOSX_DEPLOYMENT_TARGET: '12.0'
-        run: npm run prebuild
+        run: npm run prebuild -- --target ${{ matrix.node-version }}.0.0
 
       - name: Verify prebuild
         env:
-          PREBUILD: prebuilds/${{ matrix.platform }}-${{ matrix.arch }}/fuse-napi.node
+          PREBUILD: prebuilds/${{ matrix.platform }}-${{ matrix.arch }}/fuse-napi.abi${{ matrix.abi }}.node
         run: |
           test -f "$PREBUILD"
           file "$PREBUILD"
@@ -138,7 +186,7 @@ jobs:
       - name: Verify Linux linkage
         if: matrix.platform == 'linux'
         env:
-          PREBUILD: prebuilds/${{ matrix.platform }}-${{ matrix.arch }}/fuse-napi.node
+          PREBUILD: prebuilds/${{ matrix.platform }}-${{ matrix.arch }}/fuse-napi.abi${{ matrix.abi }}.node
         run: |
           ldd "$PREBUILD" | grep 'libfuse3.so.3'
           newest_glibc="$(
@@ -157,7 +205,7 @@ jobs:
       - name: Verify macOS linkage
         if: matrix.platform == 'darwin'
         env:
-          PREBUILD: prebuilds/${{ matrix.platform }}-${{ matrix.arch }}/fuse-napi.node
+          PREBUILD: prebuilds/${{ matrix.platform }}-${{ matrix.arch }}/fuse-napi.abi${{ matrix.abi }}.node
         run: |
           otool -L "$PREBUILD" | grep '/usr/local/lib/libfuse3'
           xcrun vtool -show-build "$PREBUILD" | grep 'minos 12.0'
@@ -165,7 +213,118 @@ jobs:
       - name: Upload prebuild
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: prebuild-${{ matrix.platform }}-${{ matrix.arch }}
+          name: prebuild-${{ matrix.platform }}-${{ matrix.arch }}-node${{ matrix.node-version }}
+          path: prebuilds/
+          if-no-files-found: error
+
+  build-modern-linux:
+    name: Build Linux ${{ matrix.arch }} libfuse ABI 4 / Node.js ${{ matrix.node-version }}
+    needs:
+      - validate
+      - ci
+      - quality
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 22
+            abi: 127
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 22
+            abi: 127
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 24
+            abi: 137
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 24
+            abi: 137
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 26
+            abi: 147
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 26
+            abi: 147
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build ABI-specific prebuild with libfuse 3.18.2 on glibc 2.31
+        run: |
+          docker run --rm \
+            --volume "$PWD:/workspace" \
+            --workdir /workspace \
+            node:${{ matrix.node-version }}-bullseye \
+            bash -euxo pipefail -c '
+              apt-get update
+              apt-get install --yes \
+                build-essential curl libudev-dev ninja-build pkg-config python3-pip
+              printf "%s\n" \
+                "meson==1.7.2 --hash=sha256:82c6818dc81743c96de3a458f06175776ebfde4081195ea31ea6971838f25e38" \
+                > /tmp/meson-requirements.txt
+              python3 -m pip install --require-hashes -r /tmp/meson-requirements.txt
+              curl --fail --location --silent --show-error \
+                https://github.com/libfuse/libfuse/releases/download/fuse-3.18.2/fuse-3.18.2.tar.gz \
+                --output /tmp/fuse-3.18.2.tar.gz
+              printf "%s  %s\n" \
+                f01de85717e20adf5f98aff324acd85dd73d61a5ca3834d573dcf0bd6e54a298 \
+                /tmp/fuse-3.18.2.tar.gz |
+                sha256sum --check --strict
+              tar -xzf /tmp/fuse-3.18.2.tar.gz -C /tmp
+              meson setup /tmp/fuse-build /tmp/fuse-3.18.2 \
+                -Dexamples=false -Dtests=false
+              meson compile -C /tmp/fuse-build
+              meson install -C /tmp/fuse-build
+              ldconfig
+              test "$(pkg-config --modversion fuse3)" = 3.18.2
+              npm ci --ignore-scripts
+              npm run prebuild -- --target ${{ matrix.node-version }}.0.0
+              mv \
+                prebuilds/linux-${{ matrix.arch }} \
+                prebuilds/linux-${{ matrix.arch }}-fuse4
+              rm -rf build
+              PREBUILDS_ONLY=1 node -e "
+                const binding = require(\"./lib/native-binding\")
+                  .loadNativeBinding(process.cwd())
+                const runtime = binding.fuse_native_runtime_info()
+                if (runtime.version !== \"3.18.2\" || !runtime.hasStatx) process.exit(1)
+              "
+            '
+
+      - name: Verify modern Linux prebuild and baseline
+        env:
+          PREBUILD: prebuilds/linux-${{ matrix.arch }}-fuse4/fuse-napi.abi${{ matrix.abi }}.node
+        run: |
+          test -f "$PREBUILD"
+          file "$PREBUILD"
+          ldd "$PREBUILD" | grep 'libfuse3.so.4'
+          newest_glibc="$(
+            objdump -T "$PREBUILD" |
+              grep -o 'GLIBC_[0-9.]*' |
+              sort --version-sort --unique |
+              tail -1
+          )"
+          test -n "$newest_glibc"
+          test "$(
+            printf '%s\n' "$newest_glibc" GLIBC_2.31 |
+              sort --version-sort |
+              tail -1
+          )" = GLIBC_2.31
+
+      - name: Upload modern Linux prebuild
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prebuild-linux-${{ matrix.arch }}-fuse4-node${{ matrix.node-version }}
           path: prebuilds/
           if-no-files-found: error
 
@@ -256,7 +415,7 @@ jobs:
       - name: Download native prebuild
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: prebuild-${{ matrix.platform }}-${{ matrix.arch }}
+          name: prebuild-${{ matrix.platform }}-${{ matrix.arch }}-node${{ matrix.node-version }}
           path: prebuilds
 
       - name: Load prebuild without compiling
@@ -268,9 +427,15 @@ jobs:
     name: Assemble npm package
     needs:
       - build
+      - build-modern-linux
       - smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
 
     steps:
       - name: Check out repository
@@ -294,20 +459,46 @@ jobs:
 
       - name: Verify all release targets
         run: |
-          test -f prebuilds/linux-x64/fuse-napi.node
-          test -f prebuilds/linux-arm64/fuse-napi.node
-          test -f prebuilds/darwin-x64/fuse-napi.node
-          test -f prebuilds/darwin-arm64/fuse-napi.node
+          for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            test -f "prebuilds/$target/fuse-napi.abi127.node"
+            test -f "prebuilds/$target/fuse-napi.abi137.node"
+            test -f "prebuilds/$target/fuse-napi.abi147.node"
+          done
+          for target in linux-x64-fuse4 linux-arm64-fuse4; do
+            test -f "prebuilds/$target/fuse-napi.abi127.node"
+            test -f "prebuilds/$target/fuse-napi.abi137.node"
+            test -f "prebuilds/$target/fuse-napi.abi147.node"
+          done
           npm run verify:release
 
       - name: Pack npm tarball
         run: |
           npm pack
-          tar -tzf fuse-napi-*.tgz | grep 'prebuilds/linux-x64/fuse-napi.node'
-          tar -tzf fuse-napi-*.tgz | grep 'prebuilds/linux-arm64/fuse-napi.node'
-          tar -tzf fuse-napi-*.tgz | grep 'prebuilds/darwin-x64/fuse-napi.node'
-          tar -tzf fuse-napi-*.tgz | grep 'prebuilds/darwin-arm64/fuse-napi.node'
-          shasum -a 256 fuse-napi-*.tgz > SHA256SUMS
+          for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64; do
+            for abi in 127 137 147; do
+              tar -tzf fuse-napi-*.tgz |
+                grep "prebuilds/$target/fuse-napi.abi$abi.node"
+            done
+          done
+          for target in linux-x64-fuse4 linux-arm64-fuse4; do
+            for abi in 127 137 147; do
+              tar -tzf fuse-napi-*.tgz |
+                grep "prebuilds/$target/fuse-napi.abi$abi.node"
+            done
+          done
+          npm sbom --omit=dev --sbom-format cyclonedx > fuse-napi-sbom.cdx.json
+          shasum -a 256 fuse-napi-*.tgz fuse-napi-sbom.cdx.json > SHA256SUMS
+
+      - name: Attest package build provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: fuse-napi-*.tgz
+
+      - name: Attest package SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: fuse-napi-*.tgz
+          sbom-path: fuse-napi-sbom.cdx.json
 
       - name: Upload npm tarball
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -315,12 +506,13 @@ jobs:
           name: npm-package
           path: |
             fuse-napi-*.tgz
+            fuse-napi-sbom.cdx.json
             SHA256SUMS
           if-no-files-found: error
           retention-days: 30
 
   package-smoke:
-    name: Install npm tarball on ${{ matrix.platform }}-${{ matrix.arch }}
+    name: Install npm tarball on ${{ matrix.platform }}-${{ matrix.arch }} / Node.js ${{ matrix.node-version }}
     needs: package
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -332,15 +524,51 @@ jobs:
           - runner: ubuntu-24.04
             platform: linux
             arch: x64
+            node-version: 22
           - runner: ubuntu-24.04-arm
             platform: linux
             arch: arm64
+            node-version: 22
           - runner: macos-15-intel
             platform: darwin
             arch: x64
+            node-version: 22
           - runner: macos-15
             platform: darwin
             arch: arm64
+            node-version: 22
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            node-version: 24
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            node-version: 24
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+            node-version: 24
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+            node-version: 24
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+            node-version: 26
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            node-version: 26
+          - runner: macos-15-intel
+            platform: darwin
+            arch: x64
+            node-version: 26
+          - runner: macos-15
+            platform: darwin
+            arch: arm64
+            node-version: 26
 
     steps:
       - name: Check out repository
@@ -349,7 +577,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           package-manager-cache: false
 
       - name: Install Linux runtime dependency
@@ -394,3 +622,61 @@ jobs:
         run: |
           node scripts/package-mount-smoke.js \
             "$FUSE_NAPI_CONSUMER/node_modules/fuse-napi"
+
+  modern-package-smoke:
+    name: Mount exact npm tarball with libfuse 3.18 / SONAME 4
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Build and install verified libfuse 3.18.2
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential curl libudev-dev meson ninja-build pkg-config
+          curl --fail --location --silent --show-error \
+            https://github.com/libfuse/libfuse/releases/download/fuse-3.18.2/fuse-3.18.2.tar.gz \
+            --output "$RUNNER_TEMP/fuse-3.18.2.tar.gz"
+          printf '%s  %s\n' \
+            f01de85717e20adf5f98aff324acd85dd73d61a5ca3834d573dcf0bd6e54a298 \
+            "$RUNNER_TEMP/fuse-3.18.2.tar.gz" |
+            sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/fuse-3.18.2.tar.gz" -C "$RUNNER_TEMP"
+          meson setup "$RUNNER_TEMP/fuse-build" "$RUNNER_TEMP/fuse-3.18.2" \
+            -Dexamples=false -Dtests=false
+          meson compile -C "$RUNNER_TEMP/fuse-build"
+          sudo meson install -C "$RUNNER_TEMP/fuse-build"
+          sudo ldconfig
+          test "$(pkg-config --modversion fuse3)" = 3.18.2
+          sudo modprobe fuse
+          sudo chmod a+rw /dev/fuse
+
+      - name: Download assembled npm package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package
+          path: release
+
+      - name: Install and exercise the exact modern npm package
+        run: |
+          cd release
+          shasum -a 256 -c SHA256SUMS
+          tarball="$(find "$PWD" -type f -name 'fuse-napi-*.tgz' -print -quit)"
+          test -n "$tarball"
+          consumer="$(mktemp -d "$RUNNER_TEMP/fuse-napi-modern-consumer.XXXXXX")"
+          npm install --prefix "$consumer" --ignore-scripts "$tarball"
+          package_root="$consumer/node_modules/fuse-napi"
+          test ! -d "$package_root/build"
+          ldd "$package_root/prebuilds/linux-x64-fuse4/fuse-napi.abi127.node" |
+            grep 'libfuse3.so.4'
+          FUSE_NAPI_PACKAGE_ROOT="$package_root" node ../test/modern-operations.js

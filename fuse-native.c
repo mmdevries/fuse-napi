@@ -40,19 +40,26 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <pthread.h>
+#ifdef __linux__
+#include <sys/sysmacros.h>
+#include <linux/stat.h>
+#endif
 
 #ifdef __APPLE__
+#include <dlfcn.h>
 /*
- * macFUSE may return transport-owned message buffers.  Its libfuse 3 runtime
- * exports this release helper even though it is not part of the portable
- * header surface.
+ * macFUSE can return transport-owned message buffers from the public custom
+ * event-loop API, but currently omits the corresponding release function from
+ * its headers. Resolve the helper at runtime so a changed backend ABI becomes
+ * a controlled mount failure rather than a load-time linker failure.
  */
-extern void fuse_buf_free(struct fuse_buf *buf);
+typedef void (*fuse_native_buf_free_fn)(struct fuse_buf *buf);
 #endif
 
 typedef struct fuse_thread_s fuse_thread_t;
 typedef struct fuse_thread_locals_s fuse_thread_locals_t;
 typedef struct fuse_worker_s fuse_worker_t;
+typedef struct fuse_poll_registration_s fuse_poll_registration_t;
 #if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
 typedef fuse_darwin_fill_dir_t fuse_native_fill_dir_t;
 #else
@@ -63,6 +70,8 @@ static void fuse_native_complete_local(fuse_thread_locals_t *l, int32_t result);
 static void fuse_native_release_local_payload(fuse_thread_locals_t *l);
 static void fuse_native_capture_context(fuse_thread_locals_t *l);
 static int fuse_native_schedule_local(fuse_thread_locals_t *l);
+static void fuse_native_close_poll_registration(fuse_poll_registration_t *registration);
+static void fuse_native_release_poll_registration(fuse_poll_registration_t *registration);
 static void fuse_native_dispose_mount(
   struct fuse *fuse,
   int mounted
@@ -100,8 +109,11 @@ static napi_status initialize_callback_arguments(
   fuse_thread_locals_t *l = get_thread_locals();\
   if (l == NULL) return -EIO;\
   l->info = NULL;\
+  l->info_out = NULL;\
   l->owned_input = NULL;\
   l->pollhandle = NULL;\
+  l->poll_registration = NULL;\
+  l->signed_result = 0;\
   l->op = op_##name;\
   l->op_fn = fuse_native_dispatch_##name;\
   blk\
@@ -245,15 +257,19 @@ static const uint32_t op_write_buf = 39;
 static const uint32_t op_read_buf = 40;
 static const uint32_t op_flock = 41;
 static const uint32_t op_fallocate = 42;
-#define FUSE_OPERATION_COUNT 43
+static const uint32_t op_copy_file_range = 43;
+static const uint32_t op_lseek = 44;
+#define FUSE_OPERATION_COUNT 45
 #define FUSE_MAX_WORKERS 64
 #define FUSE_OPERATION_FLAG_NULL_PATH_OK 1U
 #define FUSE_OPERATION_FLAG_NO_PATH 2U
 #define FUSE_OPERATION_FLAG_UTIME_OMIT_OK 4U
 #define FUSE_OPERATION_FLAG_DIRECT_IO 8U
+#define FUSE_OPERATION_FLAG_POLL_HANDLE 16U
 #define FUSE_OPERATION_FLAGS_ALLOWED \
   (FUSE_OPERATION_FLAG_NULL_PATH_OK | FUSE_OPERATION_FLAG_NO_PATH | \
-   FUSE_OPERATION_FLAG_UTIME_OMIT_OK | FUSE_OPERATION_FLAG_DIRECT_IO)
+   FUSE_OPERATION_FLAG_UTIME_OMIT_OK | FUSE_OPERATION_FLAG_DIRECT_IO | \
+   FUSE_OPERATION_FLAG_POLL_HANDLE)
 
 // Data structures
 
@@ -293,13 +309,19 @@ struct fuse_thread_s {
   int env_cleanup;
   int cleanup_error;
   int cleanup_thread_joined;
+  int fuse_cache_cleanup_started;
   atomic_int loop_result;
   size_t max_workers;
   size_t workers_started;
   size_t close_pending;
   fuse_thread_locals_t *locals;
   fuse_worker_t *workers;
+  fuse_poll_registration_t *polls;
+  uint64_t next_poll_id;
   napi_async_cleanup_hook_handle cleanup_hook;
+#ifdef __APPLE__
+  fuse_native_buf_free_fn buf_free;
+#endif
 
   uv_async_t loop_exit_async;
   uv_mutex_t mut;
@@ -315,6 +337,15 @@ struct fuse_worker_s {
   struct fuse_buf buffer;
 };
 
+struct fuse_poll_registration_s {
+  /* Immutable while either the registry or an in-flight request owns it. */
+  fuse_thread_t *fuse;
+  struct fuse_pollhandle *handle;
+  uint64_t id;
+  fuse_poll_registration_t *next;
+  atomic_uint references;
+};
+
 struct fuse_thread_locals_s {
   napi_ref self;
 
@@ -327,6 +358,7 @@ struct fuse_thread_locals_s {
   const char *dest;
   char *linkname;
   struct fuse_file_info *info;
+  struct fuse_file_info *info_out;
   struct fuse_conn_info *conn;
   struct fuse_config *config;
   const void *buf;
@@ -342,6 +374,7 @@ struct fuse_thread_locals_s {
   struct timespec atime;
   struct timespec mtime;
   int32_t res;
+  int64_t signed_result;
   uint32_t request_uid;
   uint32_t request_gid;
   uint32_t request_pid;
@@ -360,6 +393,7 @@ struct fuse_thread_locals_s {
   void *ioctl_data;
   uintptr_t ioctl_argument;
   struct fuse_pollhandle *pollhandle;
+  fuse_poll_registration_t *poll_registration;
   unsigned *poll_revents;
   struct fuse_bufvec **bufvec_out;
 
@@ -396,6 +430,93 @@ static void fuse_native_release_local_payload (fuse_thread_locals_t *l) {
     fuse_pollhandle_destroy(l->pollhandle);
     l->pollhandle = NULL;
   }
+  if (l->poll_registration != NULL) {
+    fuse_native_close_poll_registration(l->poll_registration);
+    l->poll_registration = NULL;
+  }
+}
+
+static fuse_poll_registration_t *fuse_native_register_poll (
+  fuse_thread_t *ft,
+  struct fuse_pollhandle *handle
+) {
+  if (handle == NULL || !ft->mutex_initialized) return NULL;
+  fuse_poll_registration_t *registration = calloc(1, sizeof(*registration));
+  if (registration == NULL) return NULL;
+
+  uv_mutex_lock(&(ft->mut));
+  if (atomic_load(&(ft->cleanup_requested))) {
+    uv_mutex_unlock(&(ft->mut));
+    free(registration);
+    return NULL;
+  }
+  ft->next_poll_id++;
+  if (ft->next_poll_id == 0) ft->next_poll_id++;
+  registration->fuse = ft;
+  registration->handle = handle;
+  registration->id = ft->next_poll_id;
+  registration->next = ft->polls;
+  /*
+   * The registry and the in-flight request each own one reference. JavaScript
+   * may close a PollHandle before its original callback completes, while
+   * teardown may concurrently close the entire registry.
+   */
+  atomic_init(&(registration->references), 2);
+  ft->polls = registration;
+  uv_mutex_unlock(&(ft->mut));
+  return registration;
+}
+
+static void fuse_native_release_poll_registration (
+  fuse_poll_registration_t *registration
+) {
+  if (registration != NULL &&
+      atomic_fetch_sub(&(registration->references), 1) == 1) {
+    free(registration);
+  }
+}
+
+static void fuse_native_close_poll_registration (
+  fuse_poll_registration_t *registration
+) {
+  if (registration == NULL) return;
+  fuse_thread_t *ft = registration->fuse;
+  struct fuse_pollhandle *handle = NULL;
+  bool removed = false;
+  if (ft != NULL && ft->mutex_initialized) {
+    uv_mutex_lock(&(ft->mut));
+    fuse_poll_registration_t **cursor = &(ft->polls);
+    while (*cursor != NULL && *cursor != registration) {
+      cursor = &((*cursor)->next);
+    }
+    if (*cursor == registration) {
+      *cursor = registration->next;
+      handle = registration->handle;
+      registration->handle = NULL;
+      removed = true;
+    }
+    uv_mutex_unlock(&(ft->mut));
+  }
+  if (handle != NULL) fuse_pollhandle_destroy(handle);
+  if (removed) fuse_native_release_poll_registration(registration);
+  fuse_native_release_poll_registration(registration);
+}
+
+static void fuse_native_close_all_polls (fuse_thread_t *ft) {
+  if (!ft->mutex_initialized) return;
+  uv_mutex_lock(&(ft->mut));
+  fuse_poll_registration_t *registration = ft->polls;
+  ft->polls = NULL;
+  while (registration != NULL) {
+    fuse_poll_registration_t *next = registration->next;
+    if (registration->handle != NULL) {
+      fuse_pollhandle_destroy(registration->handle);
+      registration->handle = NULL;
+    }
+    fuse_native_release_poll_registration(registration);
+    registration = next;
+  }
+  uv_mutex_unlock(&(ft->mut));
 }
 
 static pthread_key_t thread_locals_key;
@@ -720,6 +841,17 @@ static int get_uint32_array (napi_env env, napi_value value, uint32_t **data, si
   return 0;
 }
 
+static int value_to_int64_words (napi_env env, napi_value value, int64_t *result) {
+  uint32_t *words = NULL;
+  size_t length = 0;
+  if (get_uint32_array(env, value, &words, &length) != 0 || length != 2) {
+    return -1;
+  }
+  uint32_t *cursor = words;
+  *result = uint32s_to_int64(&cursor);
+  return 0;
+}
+
 static napi_status create_owned_buffer (
   napi_env env,
   const void *source,
@@ -802,7 +934,7 @@ FUSE_METHOD(getattr, 1, 1, (const char *path, struct stat *stat), {
   l->path = path;
   l->stat = stat;
 }, {
-  napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
+  FUSE_CREATE_PATH_ARGV(l->path, 2)
 }, {
   uint32_t *ints = NULL;
   size_t ints_length = 0;
@@ -953,7 +1085,7 @@ FUSE_METHOD(create, 3, 2, (const char *path, mode_t mode, struct fuse_file_info 
   FUSE_APPLY_FILE_INFO_RESULT()
 })
 
-FUSE_METHOD_VOID(utimens, 7, 0, (
+FUSE_METHOD_VOID(utimens, 8, 0, (
   const char *path,
   const struct timespec tv[2],
   struct fuse_file_info *info
@@ -963,7 +1095,7 @@ FUSE_METHOD_VOID(utimens, 7, 0, (
   l->mtime = tv[1];
   l->info = info;
 }, {
-  napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
+  FUSE_CREATE_PATH_ARGV(l->path, 2)
   FUSE_UINT64_TO_INTS_ARGV(l->atime.tv_sec, 3)
   napi_create_uint32(
     env,
@@ -976,6 +1108,7 @@ FUSE_METHOD_VOID(utimens, 7, 0, (
     fuse_native_timespec_nanoseconds(l->mtime.tv_nsec),
     &(argv[8])
   );
+  FUSE_CREATE_FILE_HANDLE_ARGV(9)
 })
 
 FUSE_METHOD_VOID(release, 2, 0, (const char *path, struct fuse_file_info *info), {
@@ -1291,7 +1424,7 @@ FUSE_METHOD_VOID(truncate, 3, 0, (const char *path, off_t size), {
   l->path = path;
   l->offset = size;
 }, {
-  napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
+  FUSE_CREATE_PATH_ARGV(l->path, 2)
   FUSE_UINT64_TO_INTS_ARGV(l->offset, 3)
 })
 
@@ -1350,7 +1483,7 @@ FUSE_METHOD(readlink, 1, 1, (const char *path, char *linkname, size_t len), {
   }
 })
 
-FUSE_METHOD_VOID(chown, 3, 0, (
+FUSE_METHOD_VOID(chown, 4, 0, (
   const char *path,
   uid_t uid,
   gid_t gid,
@@ -1361,12 +1494,13 @@ FUSE_METHOD_VOID(chown, 3, 0, (
   l->gid = gid;
   l->info = info;
 }, {
-  napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
+  FUSE_CREATE_PATH_ARGV(l->path, 2)
   napi_create_uint32(env, l->uid, &(argv[3]));
   napi_create_uint32(env, l->gid, &(argv[4]));
+  FUSE_CREATE_FILE_HANDLE_ARGV(5)
 })
 
-FUSE_METHOD_VOID(chmod, 2, 0, (
+FUSE_METHOD_VOID(chmod, 3, 0, (
   const char *path,
   mode_t mode,
   struct fuse_file_info *info
@@ -1375,8 +1509,9 @@ FUSE_METHOD_VOID(chmod, 2, 0, (
   l->mode = mode;
   l->info = info;
 }, {
-  napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
+  FUSE_CREATE_PATH_ARGV(l->path, 2)
   napi_create_uint32(env, l->mode, &(argv[3]));
+  FUSE_CREATE_FILE_HANDLE_ARGV(4)
 })
 
 FUSE_METHOD_VOID(mknod, 3, 0, (const char *path, mode_t mode, dev_t dev), {
@@ -1395,17 +1530,18 @@ FUSE_METHOD_VOID(unlink, 1, 0, (const char *path), {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
 })
 
-FUSE_METHOD_VOID(rename, 2, 0, (
+FUSE_METHOD_VOID(rename, 3, 0, (
   const char *path,
   const char *dest,
   unsigned int flags
 ), {
-  if (flags != 0) return -EOPNOTSUPP;
   l->path = path;
   l->dest = dest;
+  l->flags = (int) flags;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   napi_create_string_utf8(env, l->dest, NAPI_AUTO_LENGTH, &(argv[3]));
+  napi_create_uint32(env, (uint32_t) l->flags, &(argv[4]));
 })
 
 FUSE_METHOD_VOID(link, 2, 0, (const char *path, const char *dest), {
@@ -1692,7 +1828,7 @@ FUSE_METHOD(ioctl, 6, 1, (
   }
 })
 
-FUSE_METHOD(poll, 2, 1, (
+FUSE_METHOD(poll, 3, 1, (
   const char *path,
   struct fuse_file_info *info,
   struct fuse_pollhandle *pollhandle,
@@ -1702,15 +1838,33 @@ FUSE_METHOD(poll, 2, 1, (
   l->info = info;
   l->pollhandle = pollhandle;
   l->poll_revents = revents;
+  if (pollhandle != NULL &&
+      (l->fuse->operation_flags & FUSE_OPERATION_FLAG_POLL_HANDLE) != 0) {
+    l->poll_registration = fuse_native_register_poll(l->fuse, pollhandle);
+    if (l->poll_registration == NULL) {
+      fuse_pollhandle_destroy(pollhandle);
+      l->pollhandle = NULL;
+      return -ENOMEM;
+    }
+    l->pollhandle = NULL;
+  }
 }, {
   FUSE_CREATE_PATH_ARGV(l->path, 2)
   FUSE_CREATE_FILE_HANDLE_ARGV(3)
+  FUSE_CREATE_UINT64_ARGV(
+    l->poll_registration == NULL ? 0 : l->poll_registration->id,
+    4
+  )
 }, {
   uint32_t events = 0;
   if (res == 0 && napi_get_value_uint32(env, argv[2], &events) != napi_ok) {
     res = -EINVAL;
   }
-  if (res == 0) *(l->poll_revents) = events;
+  if (res == 0) {
+    *(l->poll_revents) = events;
+    fuse_native_release_poll_registration(l->poll_registration);
+    l->poll_registration = NULL;
+  }
 })
 
 FUSE_METHOD(write_buf, 6, 0, (
@@ -1820,6 +1974,205 @@ FUSE_METHOD_VOID(fallocate, 7, 0, (
   FUSE_UINT64_TO_INTS_ARGV(l->offset, 5)
   FUSE_UINT64_TO_INTS_ARGV(l->length, 7)
 })
+
+static void fuse_native_dispatch_copy_file_range (
+  uv_async_t *handle,
+  fuse_thread_locals_t *l,
+  fuse_thread_t *ft
+) {
+  (void) handle;
+  FUSE_NATIVE_CALLBACK(ft->handlers[op_copy_file_range], {
+    napi_value argv[13] = {0};
+    if (initialize_callback_arguments(env, argv, 13) != napi_ok ||
+        napi_get_reference_value(env, l->self, &(argv[0])) != napi_ok ||
+        napi_create_uint32(env, l->op, &(argv[1])) != napi_ok) {
+      napi_close_handle_scope(env, scope);
+      fuse_native_complete_local(l, -EIO);
+      return;
+    }
+    FUSE_CREATE_PATH_ARGV(l->path, 2)
+    FUSE_CREATE_UINT64_ARGV(l->info == NULL ? 0 : l->info->fh, 3)
+    FUSE_UINT64_TO_INTS_ARGV(l->offset, 4)
+    FUSE_CREATE_PATH_ARGV(l->dest, 6)
+    FUSE_CREATE_UINT64_ARGV(l->info_out == NULL ? 0 : l->info_out->fh, 7)
+    FUSE_UINT64_TO_INTS_ARGV(l->length, 8)
+    FUSE_CREATE_UINT64_ARGV(l->size, 10)
+    napi_create_int32(env, l->flags, &(argv[11]));
+    if (create_request_context_value(env, l, &(argv[12])) != napi_ok) {
+      napi_close_handle_scope(env, scope);
+      fuse_native_complete_local(l, -EIO);
+      return;
+    }
+    FUSE_CALL_CALLBACK(13, argv)
+  })
+}
+
+NAPI_METHOD(fuse_native_signal_copy_file_range) {
+  NAPI_ARGV(3)
+  NAPI_ARGV_BUFFER_CAST(fuse_thread_locals_t *, l, 0);
+  NAPI_ARGV_INT32(res, 1);
+  int64_t copied = 0;
+  if (res == 0 &&
+      (value_to_int64_words(env, argv[2], &copied) != 0 ||
+       copied < 0 ||
+       (uint64_t) copied > (uint64_t) l->size ||
+       copied > (int64_t) SSIZE_MAX)) {
+    res = -ERANGE;
+  }
+  if (res == 0) l->signed_result = copied;
+  fuse_native_complete_local(l, res);
+  return NULL;
+}
+
+static ssize_t fuse_native_copy_file_range (
+  const char *path_in,
+  struct fuse_file_info *info_in,
+  off_t offset_in,
+  const char *path_out,
+  struct fuse_file_info *info_out,
+  off_t offset_out,
+  size_t size,
+  int flags
+) {
+  fuse_thread_locals_t *l = get_thread_locals();
+  if (l == NULL) return -EIO;
+  l->info = info_in;
+  l->info_out = info_out;
+  l->owned_input = NULL;
+  l->pollhandle = NULL;
+  l->signed_result = 0;
+  l->op = op_copy_file_range;
+  l->op_fn = fuse_native_dispatch_copy_file_range;
+  l->path = path_in;
+  l->dest = path_out;
+  l->offset = offset_in;
+  l->length = offset_out;
+  l->size = size;
+  l->flags = flags;
+  fuse_native_capture_context(l);
+  atomic_store(&(l->waiting), 1);
+  if (fuse_native_schedule_local(l) < 0) {
+    atomic_store(&(l->waiting), 0);
+    return -EIO;
+  }
+  uv_sem_wait(&(l->sem));
+  return l->res == 0 ? (ssize_t) l->signed_result : (ssize_t) l->res;
+}
+
+static void fuse_native_dispatch_lseek (
+  uv_async_t *handle,
+  fuse_thread_locals_t *l,
+  fuse_thread_t *ft
+) {
+  (void) handle;
+  FUSE_NATIVE_CALLBACK(ft->handlers[op_lseek], {
+    napi_value argv[8] = {0};
+    if (initialize_callback_arguments(env, argv, 8) != napi_ok ||
+        napi_get_reference_value(env, l->self, &(argv[0])) != napi_ok ||
+        napi_create_uint32(env, l->op, &(argv[1])) != napi_ok) {
+      napi_close_handle_scope(env, scope);
+      fuse_native_complete_local(l, -EIO);
+      return;
+    }
+    FUSE_CREATE_PATH_ARGV(l->path, 2)
+    FUSE_CREATE_FILE_HANDLE_ARGV(3)
+    FUSE_UINT64_TO_INTS_ARGV(l->offset, 4)
+    napi_create_int32(env, l->int_value, &(argv[6]));
+    if (create_request_context_value(env, l, &(argv[7])) != napi_ok) {
+      napi_close_handle_scope(env, scope);
+      fuse_native_complete_local(l, -EIO);
+      return;
+    }
+    FUSE_CALL_CALLBACK(8, argv)
+  })
+}
+
+NAPI_METHOD(fuse_native_signal_lseek) {
+  NAPI_ARGV(3)
+  NAPI_ARGV_BUFFER_CAST(fuse_thread_locals_t *, l, 0);
+  NAPI_ARGV_INT32(res, 1);
+  int64_t offset = 0;
+  off_t converted = 0;
+  if (res == 0 &&
+      (value_to_int64_words(env, argv[2], &offset) != 0 ||
+       offset < 0 ||
+       int64_to_off_t(offset, &converted) != 0)) {
+    res = -ERANGE;
+  }
+  if (res == 0) l->signed_result = offset;
+  fuse_native_complete_local(l, res);
+  return NULL;
+}
+
+static off_t fuse_native_lseek (
+  const char *path,
+  off_t offset,
+  int whence,
+  struct fuse_file_info *info
+) {
+  fuse_thread_locals_t *l = get_thread_locals();
+  if (l == NULL) return (off_t) -EIO;
+  l->info = info;
+  l->info_out = NULL;
+  l->owned_input = NULL;
+  l->pollhandle = NULL;
+  l->signed_result = 0;
+  l->op = op_lseek;
+  l->op_fn = fuse_native_dispatch_lseek;
+  l->path = path;
+  l->offset = offset;
+  l->int_value = whence;
+  fuse_native_capture_context(l);
+  atomic_store(&(l->waiting), 1);
+  if (fuse_native_schedule_local(l) < 0) {
+    atomic_store(&(l->waiting), 0);
+    return (off_t) -EIO;
+  }
+  uv_sem_wait(&(l->sem));
+  return l->res == 0 ? (off_t) l->signed_result : (off_t) l->res;
+}
+
+#if defined(__linux__) && FUSE_VERSION >= FUSE_MAKE_VERSION(3, 18)
+static int fuse_native_statx (
+  const char *path,
+  int flags,
+  int mask,
+  struct statx *statx,
+  struct fuse_file_info *info
+) {
+  (void) flags;
+  (void) mask;
+  struct stat stat = {0};
+  int result = fuse_native_getattr_v3(path, &stat, info);
+  if (result != 0) return result;
+  if ((uint64_t) stat.st_blksize > UINT32_MAX ||
+      (uint64_t) stat.st_mode > UINT16_MAX) {
+    return -EOVERFLOW;
+  }
+
+  memset(statx, 0, sizeof(*statx));
+  statx->stx_mask = STATX_BASIC_STATS;
+  statx->stx_blksize = (uint32_t) stat.st_blksize;
+  statx->stx_nlink = (uint32_t) stat.st_nlink;
+  statx->stx_uid = stat.st_uid;
+  statx->stx_gid = stat.st_gid;
+  statx->stx_mode = (uint16_t) stat.st_mode;
+  statx->stx_ino = stat.st_ino;
+  statx->stx_size = (uint64_t) stat.st_size;
+  statx->stx_blocks = (uint64_t) stat.st_blocks;
+  statx->stx_atime.tv_sec = stat.st_atim.tv_sec;
+  statx->stx_atime.tv_nsec = (uint32_t) stat.st_atim.tv_nsec;
+  statx->stx_mtime.tv_sec = stat.st_mtim.tv_sec;
+  statx->stx_mtime.tv_nsec = (uint32_t) stat.st_mtim.tv_nsec;
+  statx->stx_ctime.tv_sec = stat.st_ctim.tv_sec;
+  statx->stx_ctime.tv_nsec = (uint32_t) stat.st_ctim.tv_nsec;
+  statx->stx_rdev_major = major(stat.st_rdev);
+  statx->stx_rdev_minor = minor(stat.st_rdev);
+  statx->stx_dev_major = major(stat.st_dev);
+  statx->stx_dev_minor = minor(stat.st_dev);
+  return 0;
+}
+#endif
 
 #define FUSE_INIT_CONFIG_MAX_WRITE 1U
 #define FUSE_INIT_CONFIG_MAX_READAHEAD 2U
@@ -2092,7 +2445,9 @@ static void fuse_native_worker_finished (void *data) {
 
 static void fuse_native_release_worker_buffer (fuse_worker_t *worker) {
 #ifdef __APPLE__
-  fuse_buf_free(&(worker->buffer));
+  if (worker->fuse->buf_free != NULL) {
+    worker->fuse->buf_free(&(worker->buffer));
+  }
 #else
   free(worker->buffer.mem);
 #endif
@@ -2158,13 +2513,22 @@ static void* start_fuse_thread (void *data) {
   } else if (workers == NULL) {
     fuse_native_record_loop_error(ft, -ENOMEM);
   } else {
+    if (fuse_start_cleanup_thread(ft->fuse) != 0) {
+      fuse_native_record_loop_error(ft, -EIO);
+      fuse_session_exit(session);
+    } else {
+      ft->fuse_cache_cleanup_started = 1;
+    }
+
     uv_mutex_lock(&(ft->mut));
     ft->workers = workers;
     uv_mutex_unlock(&(ft->mut));
 
     fuse_thread_locals_t *locals = ft->locals;
     for (size_t i = 0;
-         !atomic_load(&(ft->cleanup_requested)) && i < ft->max_workers;
+         atomic_load(&(ft->loop_result)) == 0 &&
+           !atomic_load(&(ft->cleanup_requested)) &&
+           i < ft->max_workers;
          i++) {
       if (locals == NULL) {
         fuse_native_record_loop_error(ft, -EIO);
@@ -2220,6 +2584,12 @@ static void* start_fuse_thread (void *data) {
     fuse_session_reset(session);
   }
 
+  if (ft->fuse_cache_cleanup_started) {
+    fuse_stop_cleanup_thread(ft->fuse);
+    ft->fuse_cache_cleanup_started = 0;
+  }
+
+  fuse_native_close_all_polls(ft);
   uv_mutex_lock(&(ft->mut));
   struct fuse *fuse = ft->fuse;
   int mounted = ft->fuse_mounted;
@@ -2325,6 +2695,7 @@ static void fuse_native_loop_exit_dispatch (uv_async_t *handle) {
 
 static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
   ft->mount_cleanup_pending = 1;
+  fuse_native_close_all_polls(ft);
   if (ft->fuse != NULL) {
     fuse_native_dispose_mount(ft->fuse, ft->fuse_mounted);
     ft->fuse = NULL;
@@ -2652,6 +3023,7 @@ static int fuse_native_begin_cleanup (fuse_thread_t *ft, int env_cleanup) {
   for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
     if (l->op != op_destroy) fuse_native_complete_local(l, -EIO);
   }
+  fuse_native_close_all_polls(ft);
 
   ft->cleanup_work.data = ft;
   int err = uv_queue_work(ft->loop, &(ft->cleanup_work), fuse_native_cleanup_work, fuse_native_cleanup_after);
@@ -2969,9 +3341,27 @@ NAPI_METHOD(fuse_native_mount) {
   if (implemented[op_read_buf]) ft->ops.read_buf = fuse_native_read_buf;
   if (implemented[op_flock]) ft->ops.flock = fuse_native_flock;
   if (implemented[op_fallocate]) ft->ops.fallocate = fuse_native_fallocate;
+  if (implemented[op_copy_file_range]) {
+    ft->ops.copy_file_range = fuse_native_copy_file_range;
+  }
+  if (implemented[op_lseek]) ft->ops.lseek = fuse_native_lseek;
+#if defined(__linux__) && FUSE_VERSION >= FUSE_MAKE_VERSION(3, 18)
+  if (implemented[op_getattr] || implemented[op_fgetattr]) {
+    ft->ops.statx = fuse_native_statx;
+  }
+#endif
   ft->operation_flags = operation_flags;
 
-  int err = uv_mutex_init(&(ft->mut));
+  int err = 0;
+#ifdef __APPLE__
+  *(void **) (&(ft->buf_free)) = dlsym(RTLD_DEFAULT, "fuse_buf_free");
+  if (ft->buf_free == NULL) {
+    err = ENOSYS;
+    goto mount_failed;
+  }
+#endif
+
+  err = uv_mutex_init(&(ft->mut));
   if (err < 0) goto mount_failed;
   ft->mutex_initialized = 1;
 
@@ -3053,6 +3443,117 @@ NAPI_METHOD(fuse_native_unmount) {
   return NULL;
 }
 
+NAPI_METHOD(fuse_native_notify_poll) {
+  NAPI_ARGV(2)
+  NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 0);
+  uint64_t id = 0;
+  if (ft_len < sizeof(*ft) || value_to_uint64(env, argv[1], &id) != 0 || id == 0) {
+    napi_throw_type_error(env, "EINVAL", "Invalid native poll handle");
+    return NULL;
+  }
+
+  bool notified = false;
+  if (!atomic_load(&(ft->cleanup_requested)) && ft->mutex_initialized) {
+    uv_mutex_lock(&(ft->mut));
+    for (fuse_poll_registration_t *registration = ft->polls;
+         registration != NULL;
+         registration = registration->next) {
+      if (registration->id == id && registration->handle != NULL) {
+        notified = fuse_notify_poll(registration->handle) == 0;
+        break;
+      }
+    }
+    uv_mutex_unlock(&(ft->mut));
+  }
+
+  napi_value result;
+  napi_get_boolean(env, notified, &result);
+  return result;
+}
+
+NAPI_METHOD(fuse_native_close_poll) {
+  NAPI_ARGV(2)
+  NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 0);
+  uint64_t id = 0;
+  if (ft_len < sizeof(*ft) || value_to_uint64(env, argv[1], &id) != 0 || id == 0) {
+    napi_throw_type_error(env, "EINVAL", "Invalid native poll handle");
+    return NULL;
+  }
+
+  fuse_poll_registration_t *found = NULL;
+  if (!atomic_load(&(ft->cleanup_requested)) && ft->mutex_initialized) {
+    uv_mutex_lock(&(ft->mut));
+    fuse_poll_registration_t **cursor = &(ft->polls);
+    while (*cursor != NULL) {
+      if ((*cursor)->id == id) {
+        found = *cursor;
+        *cursor = found->next;
+        break;
+      }
+      cursor = &((*cursor)->next);
+    }
+    uv_mutex_unlock(&(ft->mut));
+  }
+  if (found != NULL) {
+    struct fuse_pollhandle *handle = found->handle;
+    found->handle = NULL;
+    if (handle != NULL) fuse_pollhandle_destroy(handle);
+    fuse_native_release_poll_registration(found);
+  }
+
+  napi_value result;
+  napi_get_boolean(env, found != NULL, &result);
+  return result;
+}
+
+NAPI_METHOD(fuse_native_runtime_info) {
+  (void) info;
+  napi_value result;
+  napi_value version;
+  napi_value api_version;
+  napi_value buffer_release;
+  napi_value statx;
+  const char *package_version = fuse_pkgversion();
+  bool has_buffer_release = true;
+  bool has_statx = false;
+#ifdef __APPLE__
+  has_buffer_release = dlsym(RTLD_DEFAULT, "fuse_buf_free") != NULL;
+#endif
+#if defined(__linux__) && FUSE_VERSION >= FUSE_MAKE_VERSION(3, 18)
+  has_statx = true;
+#endif
+
+  if (napi_create_object(env, &result) != napi_ok ||
+      napi_create_string_utf8(
+        env,
+        package_version == NULL ? "" : package_version,
+        NAPI_AUTO_LENGTH,
+        &version
+      ) != napi_ok ||
+      napi_create_uint32(env, (uint32_t) fuse_version(), &api_version) != napi_ok ||
+      napi_get_boolean(env, has_buffer_release, &buffer_release) != napi_ok ||
+      napi_get_boolean(env, has_statx, &statx) != napi_ok ||
+      napi_set_named_property(env, result, "version", version) != napi_ok ||
+      napi_set_named_property(env, result, "apiVersion", api_version) != napi_ok ||
+      napi_set_named_property(
+        env,
+        result,
+        "hasBufferRelease",
+        buffer_release
+      ) != napi_ok ||
+      napi_set_named_property(
+        env,
+        result,
+        "hasStatx",
+        statx
+      ) != napi_ok) {
+    napi_throw_error(env, "EFUSEINIT", "Failed to inspect the loaded libfuse runtime");
+    return NULL;
+  }
+
+  return result;
+}
+
 NAPI_INIT() {
   if (pthread_once(&(thread_locals_once), create_thread_locals_key) != 0 ||
       thread_locals_status != 0) {
@@ -3065,6 +3566,9 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(fuse_native_mount)
   NAPI_EXPORT_FUNCTION(fuse_native_cancel_mount)
   NAPI_EXPORT_FUNCTION(fuse_native_unmount)
+  NAPI_EXPORT_FUNCTION(fuse_native_notify_poll)
+  NAPI_EXPORT_FUNCTION(fuse_native_close_poll)
+  NAPI_EXPORT_FUNCTION(fuse_native_runtime_info)
 
   NAPI_EXPORT_FUNCTION(fuse_native_signal_init)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_access)
@@ -3108,6 +3612,8 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(fuse_native_signal_read_buf)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_flock)
   NAPI_EXPORT_FUNCTION(fuse_native_signal_fallocate)
+  NAPI_EXPORT_FUNCTION(fuse_native_signal_copy_file_range)
+  NAPI_EXPORT_FUNCTION(fuse_native_signal_lseek)
 
   NAPI_EXPORT_UINT32(op_init)
   NAPI_EXPORT_UINT32(op_error)
@@ -3152,4 +3658,6 @@ NAPI_INIT() {
   NAPI_EXPORT_UINT32(op_read_buf)
   NAPI_EXPORT_UINT32(op_flock)
   NAPI_EXPORT_UINT32(op_fallocate)
+  NAPI_EXPORT_UINT32(op_copy_file_range)
+  NAPI_EXPORT_UINT32(op_lseek)
 }

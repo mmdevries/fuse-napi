@@ -15,3 +15,21 @@ The initial source tree was imported from the npm package
 The package tarball was used because the source repository does not contain a
 Git tag for version 2.4.3. The baseline commit contains the tarball contents
 without project-specific modifications.
+
+## FUSE runtime build provenance
+
+Baseline Linux prebuilds are linked against the distribution libfuse 3.10.3
+ABI (`libfuse3.so.3`) on Debian bullseye/glibc 2.31. Modern Linux prebuilds
+are linked against libfuse 3.18.2 (`libfuse3.so.4`) built in the same baseline
+container from:
+
+- Release:
+  https://github.com/libfuse/libfuse/releases/tag/fuse-3.18.2
+- Source archive SHA-256:
+  `f01de85717e20adf5f98aff324acd85dd73d61a5ca3834d573dcf0bd6e54a298`
+- Meson 1.7.2 wheel SHA-256:
+  `82c6818dc81743c96de3a458f06175776ebfde4081195ea31ea6971838f25e38`
+
+The release workflow verifies both downloaded hashes, the reported libfuse
+version, shared-library linkage, target architecture, and maximum glibc
+symbol version before packaging.

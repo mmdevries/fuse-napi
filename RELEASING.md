@@ -30,7 +30,9 @@ not produce GitHub OIDC provenance.
    npm run check
    npm run test:types
    npm run test:unit
+   npm run test:fuzz
    npm test
+   npm run test:soak
    npm run verify:metadata
    ```
 
@@ -51,14 +53,19 @@ not produce GitHub OIDC provenance.
 7. Create an immutable annotated tag matching the package version exactly:
 
    ```sh
-   git tag -a v2.0.0 -m "fuse-napi v2.0.0"
-   git push origin v2.0.0
+   FUSE_NAPI_VERSION="$(node -p "require('./package.json').version")"
+   git tag -a "v$FUSE_NAPI_VERSION" -m "fuse-napi v$FUSE_NAPI_VERSION"
+   git push origin "v$FUSE_NAPI_VERSION"
+   unset FUSE_NAPI_VERSION
    ```
 
-8. In GitHub Actions, manually run `Node-API prebuilds` on the exact release
-   tag. Pushing a tag never starts this workflow or publishes automatically.
+8. In GitHub Actions, manually run `ABI-specific Node.js prebuilds` on the
+   exact release tag. Pushing a tag never starts this workflow or publishes
+   automatically.
 9. Wait until the complete workflow is green and download its `npm-package`
-   artifact. It contains the exact tarball and `SHA256SUMS`.
+   artifact. It contains the exact tarball, `SHA256SUMS`, and the CycloneDX
+   SBOM. Verify the GitHub build-provenance and SBOM attestations for that
+   workflow run as well.
 10. On both physical Macs, unpack separate copies of the artifact and run the
     following from the unpacked artifact directory. Replace `CHECKOUT` with
     the clean checkout of the same release tag:
@@ -91,7 +98,8 @@ not produce GitHub OIDC provenance.
     unset FUSE_NAPI_OTP
     ```
 
-Use a version such as `2.0.0-rc.1` first when validating release changes.
+Use a version such as `<next-version>-rc.1` first when validating release
+changes.
 Prerelease tags publish under npm's `next` dist-tag; stable versions publish
 under `latest`.
 
@@ -101,13 +109,19 @@ The manually confirmed workflow on the exact release tag:
 
 - rejects a tag that differs from `package.json` or `package-lock.json`;
 - invokes the complete Linux and hosted macOS CI matrix as a hard dependency;
-- builds four native Node-API prebuilds;
+- builds 18 Node.js ABI-specific prebuilds: three supported Node.js ABIs
+  across four platform/architecture targets, plus both Linux architectures
+  for libfuse SONAME 4;
 - verifies architecture, libfuse 3 linkage, glibc 2.31, and macOS 12 baselines;
-- loads each prebuild on Node.js 22, 24, and 26;
-- assembles one npm tarball containing all four binaries;
-- verifies and installs that exact tarball on all four target platforms;
-- performs real mounts with that tarball on Linux x64/arm64;
-- records a SHA-256 checksum; and
+- loads every matching prebuild on Node.js 22, 24, and 26;
+- assembles one npm tarball containing all 18 binaries;
+- verifies and installs that exact tarball on every supported Node.js,
+  platform, and architecture combination;
+- performs real mounts with that tarball on Linux x64/arm64 and runs the
+  modern syscall suite from the exact SONAME 4 package;
+- records SHA-256 checksums and creates a CycloneDX production-dependency
+  SBOM;
+- creates GitHub build-provenance and SBOM attestations; and
 - uploads the verified `npm-package` artifact without publishing it.
 
 Real macOS mounts are intentionally manual. The release is not approved until
@@ -120,9 +134,11 @@ Verify the registry metadata and install the published artifact on at least
 one clean Linux and one clean macOS host:
 
 ```sh
-npm view fuse-napi@2.0.0 version dist.integrity
-npm install fuse-napi@2.0.0
+FUSE_NAPI_VERSION="$(node -p "require('./package.json').version")"
+npm view "fuse-napi@$FUSE_NAPI_VERSION" version dist.integrity
+npm install "fuse-napi@$FUSE_NAPI_VERSION"
 node -e "require('fuse-napi')"
+unset FUSE_NAPI_VERSION
 ```
 
 Never reuse a published version or move an existing release tag. If a release

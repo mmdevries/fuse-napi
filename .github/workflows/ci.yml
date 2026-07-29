@@ -1,8 +1,20 @@
 name: CI
 
 on:
+  push:
+    branches:
+      - main
+      - '2.0'
+  pull_request:
+    branches:
+      - main
+      - '2.0'
   workflow_dispatch:
   workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -123,3 +135,124 @@ jobs:
           test "$(node -p process.arch)" = "$EXPECTED_ARCH"
           file build/Release/fuse.node
           otool -L build/Release/fuse.node | grep '/usr/local/lib/libfuse3'
+
+  modern-libfuse:
+    name: Linux libfuse 3.18 / SONAME 4 / statx
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential curl libudev-dev meson ninja-build pkg-config
+
+      - name: Build and install verified libfuse 3.18.2
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/libfuse/libfuse/releases/download/fuse-3.18.2/fuse-3.18.2.tar.gz \
+            --output "$RUNNER_TEMP/fuse-3.18.2.tar.gz"
+          printf '%s  %s\n' \
+            f01de85717e20adf5f98aff324acd85dd73d61a5ca3834d573dcf0bd6e54a298 \
+            "$RUNNER_TEMP/fuse-3.18.2.tar.gz" |
+            sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/fuse-3.18.2.tar.gz" -C "$RUNNER_TEMP"
+          meson setup "$RUNNER_TEMP/fuse-build" "$RUNNER_TEMP/fuse-3.18.2" \
+            -Dexamples=false -Dtests=false
+          meson compile -C "$RUNNER_TEMP/fuse-build"
+          sudo meson install -C "$RUNNER_TEMP/fuse-build"
+          sudo ldconfig
+          test "$(pkg-config --modversion fuse3)" = 3.18.2
+
+      - name: Install and inspect the native addon
+        run: |
+          npm ci
+          ldd build/Release/fuse.node | grep 'libfuse3.so.4'
+          node -e "
+            const runtime = require('node-gyp-build')('.').fuse_native_runtime_info()
+            if (runtime.version !== '3.18.2' || !runtime.hasStatx) process.exit(1)
+          "
+
+      - name: Enable FUSE device
+        run: |
+          sudo modprobe fuse
+          sudo chmod a+rw /dev/fuse
+
+      - name: Exercise modern FUSE 3 syscalls
+        run: |
+          npm run test:unit
+          node test/modern-operations.js
+
+  native-assurance:
+    name: Native analyzers, sanitizers, fuzzing, and soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Install analysis and FUSE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes clang clang-tools fuse3 libfuse3-dev pkg-config
+          sudo modprobe fuse
+          sudo chmod a+rw /dev/fuse
+
+      - name: Install exact dependencies
+        run: npm ci
+
+      - name: Fuzz public validation boundaries
+        run: npm run test:fuzz
+
+      - name: Run Clang static analyzer during a clean native rebuild
+        env:
+          CC: clang
+          CXX: clang++
+          npm_config_build_from_source: 'true'
+        run: scan-build --status-bugs npm rebuild
+
+      - name: Rebuild with AddressSanitizer and UndefinedBehaviorSanitizer
+        env:
+          CC: clang
+          CXX: clang++
+          CFLAGS: -fsanitize=address,undefined -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+          npm_config_build_from_source: 'true'
+        run: npm rebuild
+
+      - name: Run the complete mounted suite under sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:strict_string_checks=1:quarantine_size_mb=32:thread_local_quarantine_size_kb=256
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          asan_runtime="$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
+          export LD_PRELOAD="$asan_runtime"
+          npm test
+
+      - name: Exercise repeated mount, concurrency, and cleanup cycles
+        env:
+          ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:strict_string_checks=1:quarantine_size_mb=32:thread_local_quarantine_size_kb=256
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          FUSE_NAPI_SOAK_ITERATIONS: 20
+          FUSE_NAPI_SOAK_RSS_LIMIT_MB: 192
+        run: |
+          asan_runtime="$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
+          export LD_PRELOAD="$asan_runtime"
+          npm run test:soak

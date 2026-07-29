@@ -46,6 +46,12 @@ declare namespace Fuse {
     nonseekable?: boolean;
   }
 
+  export interface PollHandle {
+    readonly closed: boolean;
+    notify(): boolean;
+    close(): boolean;
+  }
+
   export interface ConnectionInfo {
     readonly protoMajor: number;
     readonly protoMinor: number;
@@ -65,6 +71,19 @@ declare namespace Fuse {
     congestionThreshold?: number;
     want?: number;
     asyncRead?: boolean;
+  }
+
+  export interface EnvironmentReport {
+    readonly ok: true;
+    readonly platform: 'linux' | 'darwin';
+    readonly helper?: 'fusermount3';
+    readonly helperVersion?: string | null;
+    readonly device?: '/dev/fuse';
+    readonly runtime?: string;
+    readonly libfuseVersion?: string | null;
+    readonly capabilities: Readonly<{
+      statx: boolean;
+    }>;
   }
 
   // Stats object produced by fuse-native index.js function getStatArray
@@ -107,17 +126,15 @@ declare namespace Fuse {
         cb: (err: Result, stat?: Stats) => void
     ) => void;
     getattr?: (
-        path: string,
+        path: HandlePath,
         cb: (err: Result, stat?: Stats) => void
     ) => void;
     flush?: (path: HandlePath, fd: FileHandle, cb: (err: Result) => void) => void;
     fsync?: (path: HandlePath, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
     fsyncdir?: (path: HandlePath, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
-    truncate?: (path: string, size: Int64, cb: (err: Result) => void) => void;
+    truncate?: (path: HandlePath, size: Int64, cb: (err: Result) => void) => void;
     ftruncate?: (path: HandlePath, fd: FileHandle, size: Int64, cb: (err: Result) => void) => void;
     readlink?: (path: string, cb: (err: Result, linkName?: string) => void) => void;
-    chown?: (path: string, uid: number, gid: number, cb: (err: Result) => void) => void;
-    chmod?: (path: string, mode: number, cb: (err: Result) => void) => void;
     mknod?: (path: string, mode: number, dev: Uint64, cb: (err: Result) => void) => void;
     setxattr?: (
         path: string,
@@ -152,7 +169,6 @@ declare namespace Fuse {
     release?: (path: HandlePath, fd: FileHandle, cb: (err: Result) => void) => void;
     releasedir?: (path: HandlePath, fd: FileHandle, cb: (err: Result) => void) => void;
     unlink?: (path: string, cb: (err: Result) => void) => void;
-    rename?: (src: string, dest: string, cb: (err: Result) => void) => void;
     link?: (src: string, dest: string, cb: (err: Result) => void) => void;
     symlink?: (src: string, dest: string, cb: (err: Result) => void) => void;
     mkdir?: (path: string, mode: number, cb: (err: Result) => void) => void;
@@ -180,11 +196,6 @@ declare namespace Fuse {
         data: Buffer,
         cb: (err: Result, output?: Buffer) => void
     ) => void;
-    poll?: (
-        path: HandlePath,
-        fd: FileHandle,
-        cb: (err: Result, events?: number) => void
-    ) => void;
     flock?: (
         path: HandlePath,
         fd: FileHandle,
@@ -198,6 +209,24 @@ declare namespace Fuse {
         offset: Int64,
         length: Int64,
         cb: (err: Result) => void
+    ) => void;
+    copyFileRange?: (
+        sourcePath: HandlePath,
+        sourceFd: FileHandle,
+        sourceOffset: Int64,
+        destinationPath: HandlePath,
+        destinationFd: FileHandle,
+        destinationOffset: Int64,
+        length: Uint64,
+        flags: number,
+        cb: (result: number | bigint) => void
+    ) => void;
+    lseek?: (
+        path: HandlePath,
+        fd: FileHandle,
+        offset: Int64,
+        whence: number,
+        cb: (err: Result, offset?: Int64) => void
     ) => void;
   }
 
@@ -248,17 +277,30 @@ declare namespace Fuse {
   ) & (
     | {
         utimens?: (
-            path: string,
+            path: HandlePath,
             atime: Int64,
             mtime: Int64,
             cb: (err: Result) => void
         ) => void;
         utimensWithTimespec?: never;
+        utimensWithHandle?: never;
       }
     | {
         utimens?: never;
         utimensWithTimespec?: (
-            path: string,
+            path: HandlePath,
+            atime: Readonly<Timespec>,
+            mtime: Readonly<Timespec>,
+            cb: (err: Result) => void
+        ) => void;
+        utimensWithHandle?: never;
+      }
+    | {
+        utimens?: never;
+        utimensWithTimespec?: never;
+        utimensWithHandle?: (
+            path: HandlePath,
+            fd: FileHandle,
             atime: Readonly<Timespec>,
             mtime: Readonly<Timespec>,
             cb: (err: Result) => void
@@ -309,6 +351,80 @@ declare namespace Fuse {
             cb: (result: number) => void
         ) => void;
       }
+  ) & (
+    | {
+        chown?: (
+            path: HandlePath,
+            uid: number,
+            gid: number,
+            cb: (err: Result) => void
+        ) => void;
+        chownWithHandle?: never;
+      }
+    | {
+        chown?: never;
+        chownWithHandle?: (
+            path: HandlePath,
+            fd: FileHandle,
+            uid: number,
+            gid: number,
+            cb: (err: Result) => void
+        ) => void;
+      }
+  ) & (
+    | {
+        chmod?: (
+            path: HandlePath,
+            mode: number,
+            cb: (err: Result) => void
+        ) => void;
+        chmodWithHandle?: never;
+      }
+    | {
+        chmod?: never;
+        chmodWithHandle?: (
+            path: HandlePath,
+            fd: FileHandle,
+            mode: number,
+            cb: (err: Result) => void
+        ) => void;
+      }
+  ) & (
+    | {
+        rename?: (
+            src: string,
+            dest: string,
+            cb: (err: Result) => void
+        ) => void;
+        renameWithFlags?: never;
+      }
+    | {
+        rename?: never;
+        renameWithFlags?: (
+            src: string,
+            dest: string,
+            flags: number,
+            cb: (err: Result) => void
+        ) => void;
+      }
+  ) & (
+    | {
+        poll?: (
+            path: HandlePath,
+            fd: FileHandle,
+            cb: (err: Result, events?: number) => void
+        ) => void;
+        pollWithHandle?: never;
+      }
+    | {
+        poll?: never;
+        pollWithHandle?: (
+            path: HandlePath,
+            fd: FileHandle,
+            handle: PollHandle | null,
+            cb: (err: Result, events?: number) => void
+        ) => void;
+      }
   );
 
   export type OperationName =
@@ -319,7 +435,7 @@ declare namespace Fuse {
     | 'read' | 'write' | 'release' | 'releasedir' | 'create' | 'unlink'
     | 'rename' | 'link' | 'symlink' | 'mkdir' | 'rmdir' | 'destroy'
     | 'lock' | 'bmap' | 'ioctl' | 'poll' | 'writeBuffer' | 'readBuffer'
-    | 'flock' | 'fallocate';
+    | 'flock' | 'fallocate' | 'copyFileRange' | 'lseek';
 
   export type Timeouts = {
     default?: number | false;
@@ -404,6 +520,16 @@ declare class Fuse {
 
   /** Validate and normalize-check an options object without mounting. */
   static validateOptions(opts?: Fuse.OPTIONS): void;
+
+  /** Verify the complete host FUSE runtime before attempting a mount. */
+  static checkEnvironment(opts?: Fuse.OPTIONS): Promise<Fuse.EnvironmentReport>;
+  static checkEnvironment(
+      opts: Fuse.OPTIONS,
+      cb: (err: Error | null, report?: Fuse.EnvironmentReport) => void
+  ): void;
+  static checkEnvironment(
+      cb: (err: Error | null, report?: Fuse.EnvironmentReport) => void
+  ): void;
 
   static unmount(mnt: string, cb?: (err: null | Error) => void): void;
 
