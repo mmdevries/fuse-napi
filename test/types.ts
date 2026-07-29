@@ -144,17 +144,25 @@ const nativeOptionAliases: Fuse.OPTIONS = {
   auto_unmount: true,
   default_permissions: true,
   max_read: 1024,
-  user_id: 501,
-  kernel_cache: true,
+  kernel_cache: false,
   auto_cache: true,
-  direct_io: true,
+  direct_io: false,
   entry_timeout: 1,
   attr_timeout: 1,
   ac_attr_timeout: 1,
-  nonempty: true,
+  nonempty: false,
   nopath: true
 }
+Fuse.validateOptions(nativeOptionAliases)
 new Fuse(mountpoint, {}, nativeOptionAliases)
+const invalidInternalOption: Fuse.OPTIONS = {
+  // @ts-expect-error user_id is managed internally by FUSE 3
+  user_id: 501
+}
+const invalidRemovedOption: Fuse.OPTIONS = {
+  // @ts-expect-error nonempty: true was removed by FUSE 3
+  nonempty: true
+}
 const context: Readonly<Fuse.RequestContext> | null = instance.context()
 const now: number = Fuse.UTIME_NOW
 void context
@@ -165,3 +173,5 @@ void invalidReaddir
 void invalidCreate
 void invalidRead
 void invalidUtimens
+void invalidInternalOption
+void invalidRemovedOption

@@ -148,12 +148,9 @@ Create a new `Fuse` object.
 
 ```js
 {
-  displayFolder: true, // Add a name/icon to the mounted volume on macOS.
-  name: 'Folder Name', // Volume name used with displayFolder.
   debug: false,        // Enable detailed tracing of operations.
   force: false,        // Attempt to unmount before remounting.
   mkdir: false,        // Create the mountpoint before mounting.
-  nonEmpty: false,     // Deprecated compatibility no-op on FUSE 3.
   directIo: false,     // Set fuse_config.direct_io for every opened file.
   timeout: 15000,      // Operation and mount-start timeout in milliseconds.
   maxConcurrency: 4,   // Fixed native request-worker count (1 through 64).
@@ -162,6 +159,15 @@ Create a new `Fuse` object.
   onError: (error, operation, args) => {
     // Report exceptions thrown by an operation implementation.
   }
+}
+```
+
+On macOS, volume presentation can additionally be configured with:
+
+```js
+{
+  displayFolder: true,
+  name: 'Folder Name'
 }
 ```
 
@@ -174,13 +180,32 @@ exception, or rejected promise is translated to a FUSE error and cannot leave
 the native worker blocked. Return values, buffer lengths, directory entries,
 extended attributes, statistics, and mount options are validated before they
 cross the native boundary. Unknown option and operation names are rejected so
-configuration mistakes cannot silently change filesystem behavior. See the
-2.0.0 section in [CHANGELOG.md](./CHANGELOG.md) when upgrading from the 1.x
-line.
+configuration mistakes cannot silently change filesystem behavior.
+
+`Fuse.validateOptions(options)` performs the same synchronous validation
+without creating a filesystem instance. Invalid combinations throw a
+`TypeError` with a stable `code` and an `options` array. The FUSE 3 preflight
+rejects removed or internal options (`nonempty`, `fd`, and `user_id`),
+platform-specific misuse, unsafe module identifiers, and conflicting cache,
+access, block-device, or inode-retention policies. For example:
+
+```js
+Fuse.validateOptions({
+  directIo: true,
+  nonempty: true
+})
+// TypeError with code ERR_FUSE_OPTION_REMOVED
+```
+
+Remove `nonempty`; use `directIo` as shown when direct I/O is required. See
+the 2.0.0 section in [CHANGELOG.md](./CHANGELOG.md) when upgrading from the
+1.x line.
+
 For mount options with a native snake-case spelling, both the JavaScript name
-and the historical libfuse name are accepted (for example, `nonEmpty`/`nonempty`,
-`directIo`/`direct_io`, and `allowOther`/`allow_other`). Inputs are normalized
-to the JavaScript name, and conflicting aliases are rejected.
+and the historical libfuse name are accepted when the underlying FUSE 3
+concept still exists (for example, `directIo`/`direct_io` and
+`allowOther`/`allow_other`). Inputs are normalized to the JavaScript name, and
+conflicting aliases are rejected.
 
 The native request loop uses exactly `maxConcurrency` workers instead of
 libfuse's dynamically growing multithreaded loop. This bounds native

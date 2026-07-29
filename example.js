@@ -65,7 +65,10 @@ const ops = {
   }
 }
 
-const fuse = new Fuse('./mnt', ops, { debug: true, displayFolder: true })
+const mountOptions = { debug: true }
+if (process.platform === 'darwin') mountOptions.displayFolder = true
+
+const fuse = new Fuse('./mnt', ops, mountOptions)
 fuse.mount(err => {
   if (err) throw err
   console.log('filesystem mounted on ' + fuse.mnt)

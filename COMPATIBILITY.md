@@ -82,57 +82,66 @@ They are deliberately outside the first milestone:
 
 ## Mount-option matrix
 
-“Pass-through” means `_fuseOptions()` serializes the option and libfuse or the
-platform mount helper decides whether it is accepted.
+Every option is validated against the supported FUSE 3 contract before
+`_fuseOptions()` serializes it. The constructor and `Fuse.validateOptions()`
+reject unsupported, internal, platform-specific, conflicting, or incomplete
+configurations before libfuse is invoked.
 
 | JavaScript option | Serialized option/behavior | Linux | macFUSE VFS | Notes |
 | --- | --- | --- | --- | --- |
 | `debug` | `debug` | Yes | Yes | Also enabled by the inherited `DEBUG` environment check. |
-| `allowOther` | `allow_other` | Yes | Yes | Security-sensitive; Linux may require `user_allow_other`. Pair with permission tests. |
-| `allowRoot` | `allow_root` | Yes | Pass-through | Validate on macOS before documenting as supported. |
-| `autoUnmount` | `auto_unmount` | Yes | Pass-through | Requires crash/interruption tests. |
+| `allowOther` | `allow_other` | Yes | Yes | Security-sensitive; Linux may require `user_allow_other`. Mutually exclusive with `allowRoot`. |
+| `allowRoot` | `allow_root` | Yes | Yes | Mutually exclusive with `allowOther`. |
+| `autoUnmount` | `auto_unmount` | Yes | Yes | Requires crash/interruption tests. |
 | `defaultPermissions` | `default_permissions` | Yes | Yes | Boolean in both runtime and TypeScript declarations. |
-| `blkdev` | `blkdev` | Linux-specific | Unverified | Boolean in both runtime and TypeScript declarations. |
-| `blksize` | `blksize=<n>` | Pass-through | Pass-through | Validate accepted ranges on both kernels. |
+| `blkdev` | `blkdev` | Yes | Rejected | Linux-only, privileged, and requires `fsname`. |
+| `blksize` | `blksize=<n>` | Yes | Rejected | Linux-only and requires `blkdev: true`. |
 | `maxRead` | `max_read=<n>` | Yes | Yes | Kernel/library limits can reduce the requested value. |
-| `fd` | `fd=<n>` | Internal/special | Internal/special | Not a normal application mount option. |
-| `userId` | `user_id=<n>` | Yes | Pass-through | Serialized as one value; explicit zero is preserved. |
+| `fd` | Rejected | Internal | Internal | libfuse3 owns the FUSE device descriptor. |
+| `userId` | Rejected | Internal | Internal | `fusermount3` owns `user_id`; use `uid` only to override returned ownership. |
 | `fsname` | `fsname=<name>` | Yes | Yes | Finder presentation also depends on `volname`. |
-| `subtype` | `subtype=<name>` | Yes | Pass-through | Verify Finder and `mount` output on macOS. |
-| `kernelCache` | `kernel_cache` | Yes | Yes | High-level libfuse option. |
-| `autoCache` | `auto_cache` | Yes | Yes | High-level libfuse option; timestamp correctness matters. |
-| `directIo` | `fuse_config.direct_io` | Yes | Yes | Applied during FUSE 3 initialization. This is separate from returning `directIO` for one `open` or `create` result. |
-| `umask` | `umask=<mask>` | Yes | Pass-through | Explicit zero is preserved; chmod behavior is covered. |
+| `subtype` | `subtype=<name>` | Yes | Yes | Reflected in platform mount information. |
+| `kernelCache` | `kernel_cache` | Yes | Yes | Cannot be combined with `autoCache` or `directIo`. |
+| `autoCache` | `auto_cache` | Yes | Yes | Cannot be combined with `kernelCache` or `directIo`. |
+| `directIo` | `fuse_config.direct_io` | Yes | Yes | Cannot be combined with page-cache policies. This is separate from returning `directIO` for one `open` or `create` result. |
+| `umask` | `umask=<mask>` | Yes | Yes | Explicit zero is preserved; chmod behavior is covered. |
 | `uid` | `uid=<n>` | Yes | Yes | Explicit zero is preserved; ownership behavior is covered. |
 | `gid` | `gid=<n>` | Yes | Yes | Explicit zero is preserved; ownership behavior is covered. |
-| `entryTimeout` | `entry_timeout=<s>` | Yes | Pass-through | Cache invalidation behavior needs tests. |
-| `attrTimeout` | `attr_timeout=<s>` | Yes | Pass-through | Cache invalidation behavior needs tests. |
-| `acAttrTimeout` | `ac_attr_timeout=<s>` | Yes | Pass-through | Used with auto-cache; verify macFUSE support. |
-| `noforget` | `noforget` | Yes | Pass-through | High memory-retention risk. |
-| `nonEmpty` | Compatibility no-op | Yes | Yes | Deprecated: FUSE 3 removed `nonempty` and permits non-empty mountpoints. |
-| `remember` | `remember=<s>` | Yes | Pass-through | High-level libfuse path-cache behavior. |
-| `modules` | `modules=<list>` | Yes | Pass-through | Depends on separately available FUSE modules. |
-| `displayFolder` | `volname`, optionally `volicon` | No-op | Yes | Uses `name` or mount basename; only emitted on macOS. |
+| `entryTimeout` | `entry_timeout=<s>` | Yes | Yes | Controls lookup caching. |
+| `attrTimeout` | `attr_timeout=<s>` | Yes | Yes | Controls attribute caching. |
+| `acAttrTimeout` | `ac_attr_timeout=<s>` | Yes | Yes | Requires `autoCache: true`. |
+| `noforget` | `noforget` | Yes | Yes | Mutually exclusive with `remember`; high memory-retention risk. |
+| `nonEmpty` | Rejected when enabled | Removed | Removed | FUSE 3 permits non-empty mountpoints without this FUSE 2 option. |
+| `remember` | `remember=<s>` | Yes | Yes | Mutually exclusive with `noforget`. |
+| `modules` | `modules=<list>` | Yes | Yes | Colon-separated module identifiers are validated; modules must still be installed. |
+| `displayFolder` | `volname`, optionally `volicon` | Rejected | Yes | Uses `name` or mount basename; macFUSE-only. |
 | `force` | Pre-mount unmount attempt | Yes | Yes | JavaScript lifecycle option, not a FUSE mount option. |
 | `mkdir` | Create missing mount point | Yes | Yes | JavaScript lifecycle option. |
 | `timeout` | JavaScript callback timeout | Yes | Yes | Bounds callbacks and mount startup; per-operation `false` and zero values are preserved. |
-| `name` | Source for `volname` | No-op | Yes | Used only when `displayFolder` is enabled. |
+| `name` | Source for `volname` | Rejected | Yes | Requires `displayFolder: true`. |
 | `onError` | JavaScript exception reporter | Yes | Yes | Receives operation exceptions and rejected promises before the request is completed with `EIO`. |
 | `maxConcurrency` | Fixed native request-worker count | Yes | Yes | Integer from 1 through 64; defaults to 4 and bounds threads, outstanding callbacks, and request memory. |
 | `nullPathOk` | `fuse_config.nullpath_ok` | Yes | Yes | Allows `null` paths for supported handle-based callbacks. |
 | `noPath` | `fuse_config.nullpath_ok` compatibility mapping | Yes | Yes | Retains the 1.x behavior; affected callbacks must accept a `null` path. |
 
-Historical native libfuse spellings are also accepted for JavaScript options whose
-names differ: `allow_other`, `allow_root`, `auto_unmount`,
-`default_permissions`, `max_read`, `user_id`, `kernel_cache`, `auto_cache`,
-`direct_io`, `entry_timeout`, `attr_timeout`, `ac_attr_timeout`, `nonempty`,
-and `nopath`. They are normalized to the JavaScript names above. Supplying
-both forms with different values is an error.
+Historical native libfuse spellings are normalized before validation:
+`allow_other`, `allow_root`, `auto_unmount`, `default_permissions`,
+`max_read`, `user_id`, `kernel_cache`, `auto_cache`, `direct_io`,
+`entry_timeout`, `attr_timeout`, `ac_attr_timeout`, `nonempty`, and `nopath`.
+Removed or internal spellings therefore receive the same actionable FUSE 3
+error as their JavaScript equivalent. Supplying both forms with different
+values is an error.
 
 String-valued mount options reject NUL, comma, backslash, and newline
 characters instead of allowing one JavaScript value to inject additional
 libfuse options. Numeric options must be finite and within their declared
 integer constraints.
+
+Conformance failures are `TypeError` instances with one of these stable codes:
+`ERR_FUSE_OPTION_REMOVED`, `ERR_FUSE_OPTION_INTERNAL`,
+`ERR_FUSE_OPTION_CONFLICT`, `ERR_FUSE_OPTION_DEPENDENCY`,
+`ERR_FUSE_OPTION_PLATFORM`, or `ERR_FUSE_OPTION_VALUE`. Their frozen
+`options` array identifies the relevant canonical JavaScript option names.
 
 ### macFUSE backend options
 

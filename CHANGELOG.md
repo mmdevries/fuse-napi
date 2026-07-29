@@ -5,6 +5,19 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
+## 2.1.0 - 2026-07-29
+
+### Changed
+
+- Mount options now pass an explicit FUSE 3 conformance preflight in both the
+  constructor and the new `Fuse.validateOptions()` helper. Stable error codes
+  identify removed/internal options, conflicts, missing dependencies,
+  platform misuse, and invalid module identifiers before libfuse is invoked.
+- `nonEmpty`/`nonempty`, `fd`, and `userId`/`user_id` are rejected with
+  actionable errors instead of being ignored or reaching libfuse3.
+- Contradictory access, page-cache, inode-retention, block-device, and
+  auto-cache settings are rejected deterministically.
+
 ## 2.0.0 - 2026-07-29
 
 ### Added
@@ -14,8 +27,6 @@ All notable changes to this project are documented here. Releases follow
 - Explicit macFUSE Darwin adapters for attributes, compound `setattr`,
   `statfs`, directory entries, resource-fork xattrs, and platform-specific
   `UTIME_NOW`/`UTIME_OMIT` encodings.
-- A production migration plan and a focused 1.x-to-2.x consumer migration
-  guide.
 
 ### Changed
 
@@ -25,7 +36,7 @@ All notable changes to this project are documented here. Releases follow
 - FUSE 3's merged `getattr`/`fgetattr` and `truncate`/`ftruncate` callbacks are
   routed to the existing JavaScript operations based on file-handle presence.
 - `directIo` is applied through `fuse_config.direct_io`; the removed
-  `nonempty` option remains accepted as a deprecated no-op.
+  `nonempty` option is not forwarded to libfuse3.
 - Linux unmount helpers use `fusermount3`. Build discovery and release
   artifacts require `fuse3`/`libfuse3-dev` and verify libfuse 3 linkage.
 - Supported Node.js versions are 22, 24, and 26; the minimum is Node.js 22.

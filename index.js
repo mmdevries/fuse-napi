@@ -7,6 +7,7 @@ const { AsyncLocalStorage } = require('async_hooks')
 const Nanoresource = require('nanoresource')
 const loadBinding = require('node-gyp-build')
 const { wrapMacFuseLoadError } = require('./lib/macfuse')
+const { validateFuse3Options } = require('./lib/fuse3-options')
 
 const IS_OSX = os.platform() === 'darwin'
 let binding
@@ -226,6 +227,13 @@ const KNOWN_OPTIONS = new Set([
 ])
 
 class Fuse extends Nanoresource {
+  static validateOptions (opts = {}) {
+    if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
+      throw new TypeError('Options must be an object')
+    }
+    normalizeAndValidateOptions(opts)
+  }
+
   constructor (mnt, ops = {}, opts = {}) {
     super()
 
@@ -238,8 +246,7 @@ class Fuse extends Nanoresource {
     if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
       throw new TypeError('Options must be an object')
     }
-    opts = normalizeOptionAliases(opts)
-    validateOptions(opts)
+    opts = normalizeAndValidateOptions(opts)
     validateOperations(ops)
     if (ops.error !== undefined) {
       throw new TypeError('Operation "error" is not a supported FUSE operation')
@@ -334,8 +341,6 @@ class Fuse extends Nanoresource {
     if (this.opts.blkdev) options.push('blkdev')
     if (hasValue('blksize')) options.push('blksize=' + mountInteger('blksize', this.opts.blksize))
     if (hasValue('maxRead')) options.push('max_read=' + mountInteger('maxRead', this.opts.maxRead))
-    if (hasValue('fd')) options.push('fd=' + mountInteger('fd', this.opts.fd))
-    if (hasValue('userId')) options.push('user_id=' + mountInteger('userId', this.opts.userId))
     if (this.opts.fsname) options.push('fsname=' + mountString('fsname', this.opts.fsname))
     if (this.opts.subtype) options.push('subtype=' + mountString('subtype', this.opts.subtype))
     if (this.opts.kernelCache) options.push('kernel_cache')
@@ -1586,7 +1591,10 @@ function validateOptions (opts) {
       throw new TypeError(`${name} must be a boolean`)
     }
   }
-  for (const name of ['uid', 'gid', 'userId', 'blksize', 'maxRead']) {
+  for (const name of ['uid', 'gid']) {
+    if (opts[name] !== undefined && opts[name] !== null) boundedInteger(name, opts[name], 0, MAX_INT32)
+  }
+  for (const name of ['userId', 'blksize', 'maxRead']) {
     if (opts[name] !== undefined && opts[name] !== null) boundedInteger(name, opts[name], 0, 0xffffffff)
   }
   if (opts.fd !== undefined && opts.fd !== null) boundedInteger('fd', opts.fd, 0, MAX_INT32)
@@ -1606,6 +1614,13 @@ function validateOptions (opts) {
   if (opts.onError !== undefined && typeof opts.onError !== 'function') {
     throw new TypeError('onError must be a function')
   }
+}
+
+function normalizeAndValidateOptions (opts) {
+  const normalized = normalizeOptionAliases(opts)
+  validateOptions(normalized)
+  validateFuse3Options(normalized)
+  return normalized
 }
 
 function normalizeOptionAliases (opts) {

@@ -63,7 +63,6 @@ tape('read and write big file', function (t) {
    */
   const fuse = new Fuse(mnt, ops, {
     debug: false,
-    autoCache: true,
     directIo: true
   })
   let fd = 0

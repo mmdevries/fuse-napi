@@ -351,14 +351,16 @@ declare namespace Fuse {
     maxRead?: number;
     /** Native libfuse spelling for maxRead. */
     max_read?: number;
-    /** Deprecated compatibility no-op: FUSE 3 removed the nonempty option. */
-    nonEmpty?: boolean;
-    /** Historical alias retained as a FUSE 3 no-op. */
-    nonempty?: boolean;
-    fd?: number;
-    userId?: number;
-    /** Native libfuse spelling for userId. */
-    user_id?: number;
+    /** @deprecated Removed by FUSE 3. Only an explicit false value is accepted. */
+    nonEmpty?: false;
+    /** @deprecated Historical spelling of the removed FUSE 2 option. */
+    nonempty?: false;
+    /** @deprecated Managed internally by libfuse3 and rejected at runtime. */
+    fd?: never;
+    /** @deprecated Managed internally by fusermount3; use uid when appropriate. */
+    userId?: never;
+    /** @deprecated Native spelling of the internal userId option. */
+    user_id?: never;
     fsname?: string;
     subtype?: string;
     kernelCache?: boolean;
@@ -399,6 +401,9 @@ declare namespace Fuse {
 
 declare class Fuse {
   constructor(mnt: string, ops?: Fuse.OPERATIONS, opts?: Fuse.OPTIONS);
+
+  /** Validate and normalize-check an options object without mounting. */
+  static validateOptions(opts?: Fuse.OPTIONS): void;
 
   static unmount(mnt: string, cb?: (err: null | Error) => void): void;
 

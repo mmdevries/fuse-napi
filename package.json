@@ -1,6 +1,6 @@
 {
   "name": "fuse-napi",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Production-grade Node-API bindings for FUSE 3 on Linux and macOS",
   "keywords": [
     "fuse",
@@ -40,6 +40,7 @@
     "fuse-native.c",
     "index.d.ts",
     "index.js",
+    "lib/fuse3-options.js",
     "lib/macfuse.js",
     "prebuilds/",
     "scripts/fuse-config.js",
@@ -87,7 +88,7 @@
     "access": "public"
   },
   "scripts": {
-    "check": "node --check index.js && node --check example.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js && node --check scripts/package-mount-smoke.js && node --check scripts/verify-release.js",
+    "check": "node --check index.js && node --check example.js && node --check lib/fuse3-options.js && node --check lib/macfuse.js && node --check scripts/fuse-config.js && node --check scripts/package-mount-smoke.js && node --check scripts/verify-release.js",
     "install": "node-gyp-build",
     "test": "tape test/*.js",
     "test:package-mount": "node scripts/package-mount-smoke.js",
