@@ -32,8 +32,9 @@ All notable changes to this project are documented here. Releases follow
 ### Fixed
 
 - Forced recovery from a disconnected mount now waits, with a finite deadline,
-  until the lazy FUSE detach is observable before starting a replacement
-  mount. This removes a Linux race that could incorrectly report
+  until the lazy FUSE detach is stable before starting a replacement mount.
+  Unmount-helper failures are propagated without continuing into native mount
+  startup. This removes a Linux race that could incorrectly report
   `Mountpoint in use`; a stalled detach reports `EFUSEUNMOUNTWAIT`.
 - Native poll registrations now have thread-safe shared ownership across
   in-flight callbacks, explicit JavaScript closure, and concurrent teardown.

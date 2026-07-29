@@ -165,7 +165,7 @@ tape('unmount waits until a lazy detach is observable', function (t) {
     delete require.cache[indexPath]
 
     t.error(err, 'unmount completes after the mount disappears')
-    t.equal(mountpointChecks, 3, 'mountpoint visibility is polled')
+    t.equal(mountpointChecks, 5, 'mountpoint must remain detached across stable observations')
     t.end()
   })
 })
@@ -202,6 +202,40 @@ tape('unmount wait is bounded and preserves the disconnect cause', function (t) 
     t.equal(err && err.code, 'EFUSEUNMOUNTWAIT', 'detach timeout has a stable error code')
     t.equal(err && err.cause && err.cause.code, 'ENOTCONN', 'last disconnect error is retained')
     t.match(err && err.message, /stuck-unmount.*detach/, 'timeout identifies the mountpoint')
+    t.end()
+  })
+})
+
+tape('forced recovery propagates unmount failures without starting a mount', function (t) {
+  const filesystem = require('fs')
+  const originalStat = filesystem.stat
+  const originalUnmount = Fuse.unmount
+  const originalCheckEnvironment = Fuse.checkEnvironment
+  const unmountError = new Error('fusermount3 failed')
+  let environmentChecks = 0
+
+  filesystem.stat = function (name, cb) {
+    const err = new Error('Transport endpoint is not connected')
+    err.code = 'ENOTCONN'
+    process.nextTick(cb, err)
+  }
+  Fuse.unmount = function (mnt, cb) {
+    process.nextTick(cb, unmountError)
+  }
+  Fuse.checkEnvironment = function (opts, cb) {
+    environmentChecks++
+    process.nextTick(cb, null)
+  }
+
+  const fuse = new Fuse('/tmp/fuse-napi-failed-recovery', {}, { force: true })
+  fuse._open(function (err) {
+    filesystem.stat = originalStat
+    Fuse.unmount = originalUnmount
+    Fuse.checkEnvironment = originalCheckEnvironment
+
+    t.equal(err, unmountError, 'the original unmount error reaches the mount callback')
+    t.equal(environmentChecks, 0, 'mount startup does not continue after failed recovery')
+    t.equal(fuse._thread, null, 'no native mount state is allocated')
     t.end()
   })
 })

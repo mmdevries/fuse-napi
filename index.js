@@ -23,6 +23,7 @@ const OSX_FOLDER_ICON = '/System/Library/CoreServices/CoreTypes.bundle/Contents/
 const HAS_FOLDER_ICON = IS_OSX && fs.existsSync(OSX_FOLDER_ICON)
 const DEFAULT_TIMEOUT = 15 * 1000
 const UNMOUNT_POLL_INTERVAL = 10
+const UNMOUNT_STABILITY_CHECKS = 3
 const DEFAULT_MAX_CONCURRENCY = 4
 const MAX_MAX_CONCURRENCY = 64
 const MAX_INT32 = 0x7fffffff
@@ -579,7 +580,12 @@ class Fuse extends Nanoresource {
 
     if (this._force) {
       return fs.stat(path.join(this.mnt, 'test'), (err, st) => {
-        if (isDisconnectedError(err)) return Fuse.unmount(this.mnt, open)
+        if (isDisconnectedError(err)) {
+          return Fuse.unmount(this.mnt, err => {
+            if (err) return cb(err)
+            return open()
+          })
+        }
         return open()
       })
     }
@@ -1743,6 +1749,7 @@ function waitForUnmountedMountpoint (mnt, cb) {
   const mountpoint = path.resolve(mnt)
   const parent = path.dirname(mountpoint)
   let lastError = null
+  let stableChecks = 0
 
   check()
 
@@ -1750,13 +1757,19 @@ function waitForUnmountedMountpoint (mnt, cb) {
     fs.stat(mountpoint, (mountErr, mountStat) => {
       if (mountErr) {
         if (mountErr.code === 'ENOENT') return cb(null)
+        stableChecks = 0
         if (isDisconnectedError(mountErr)) return retry(mountErr)
         return cb(mountErr)
       }
 
       fs.stat(parent, (parentErr, parentStat) => {
         if (parentErr) return cb(parentErr)
-        if (mountStat.dev === parentStat.dev) return cb(null)
+        if (mountStat.dev === parentStat.dev) {
+          stableChecks++
+          if (stableChecks >= UNMOUNT_STABILITY_CHECKS) return cb(null)
+          return retry()
+        }
+        stableChecks = 0
         return retry()
       })
     })
