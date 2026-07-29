@@ -22,6 +22,7 @@ const NATIVE_RUNTIME = Object.freeze(binding.fuse_native_runtime_info())
 const OSX_FOLDER_ICON = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericFolderIcon.icns'
 const HAS_FOLDER_ICON = IS_OSX && fs.existsSync(OSX_FOLDER_ICON)
 const DEFAULT_TIMEOUT = 15 * 1000
+const UNMOUNT_POLL_INTERVAL = 10
 const DEFAULT_MAX_CONCURRENCY = 4
 const MAX_MAX_CONCURRENCY = 64
 const MAX_INT32 = 0x7fffffff
@@ -565,7 +566,7 @@ class Fuse extends Nanoresource {
       killSignal: 'SIGKILL'
     }, err => {
       if (err) return cb(err)
-      return cb(null)
+      return waitForUnmountedMountpoint(mnt, cb)
     })
   }
 
@@ -578,7 +579,7 @@ class Fuse extends Nanoresource {
 
     if (this._force) {
       return fs.stat(path.join(this.mnt, 'test'), (err, st) => {
-        if (err && (err.errno === Fuse.ENOTCONN || err.errno === Fuse.ENXIO)) return Fuse.unmount(this.mnt, open)
+        if (isDisconnectedError(err)) return Fuse.unmount(this.mnt, open)
         return open()
       })
     }
@@ -1735,6 +1736,52 @@ function getStatArray (stat) {
   setTimespec(ints, 23, stat && stat.ctime, 'stat.ctime')
 
   return ints
+}
+
+function waitForUnmountedMountpoint (mnt, cb) {
+  const deadline = Date.now() + DEFAULT_TIMEOUT
+  const mountpoint = path.resolve(mnt)
+  const parent = path.dirname(mountpoint)
+  let lastError = null
+
+  check()
+
+  function check () {
+    fs.stat(mountpoint, (mountErr, mountStat) => {
+      if (mountErr) {
+        if (mountErr.code === 'ENOENT') return cb(null)
+        if (isDisconnectedError(mountErr)) return retry(mountErr)
+        return cb(mountErr)
+      }
+
+      fs.stat(parent, (parentErr, parentStat) => {
+        if (parentErr) return cb(parentErr)
+        if (mountStat.dev === parentStat.dev) return cb(null)
+        return retry()
+      })
+    })
+  }
+
+  function retry (cause) {
+    if (cause) lastError = cause
+    if (Date.now() < deadline) {
+      return setTimeout(check, UNMOUNT_POLL_INTERVAL)
+    }
+
+    const err = new Error(`Timed out waiting for FUSE mount ${JSON.stringify(mountpoint)} to detach`)
+    err.code = 'EFUSEUNMOUNTWAIT'
+    if (lastError) err.cause = lastError
+    return cb(err)
+  }
+}
+
+function isDisconnectedError (err) {
+  return !!err && (
+    err.code === 'ENOTCONN' ||
+    err.code === 'ENXIO' ||
+    err.errno === Fuse.ENOTCONN ||
+    err.errno === Fuse.ENXIO
+  )
 }
 
 function normalizeTimeoutOption (timeout) {

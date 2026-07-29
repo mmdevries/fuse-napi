@@ -158,7 +158,7 @@ Create a new `Fuse` object.
 ```js
 {
   debug: false,        // Enable detailed tracing of operations.
-  force: false,        // Attempt to unmount before remounting.
+  force: false,        // Recover a disconnected mount before remounting.
   mkdir: false,        // Create the mountpoint before mounting.
   directIo: false,     // Set fuse_config.direct_io for every opened file.
   timeout: 15000,      // Operation and mount-start timeout in milliseconds.
@@ -170,6 +170,12 @@ Create a new `Fuse` object.
   }
 }
 ```
+
+`force` only detaches a disconnected FUSE mount; it does not replace a healthy
+mounted filesystem. A successful unmount helper is followed by a bounded
+readiness check, so the replacement mount does not race a lazy detach. If the
+detach is still not observable after 15 seconds, mounting fails with
+`EFUSEUNMOUNTWAIT`.
 
 On macOS, volume presentation can additionally be configured with:
 

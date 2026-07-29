@@ -118,7 +118,7 @@ configurations before libfuse is invoked.
 | `remember` | `remember=<s>` | Yes | Yes | Mutually exclusive with `noforget`. |
 | `modules` | `modules=<list>` | Yes | Yes | Colon-separated module identifiers are validated; modules must still be installed. |
 | `displayFolder` | `volname`, optionally `volicon` | Rejected | Yes | Uses `name` or mount basename; macFUSE-only. |
-| `force` | Pre-mount unmount attempt | Yes | Yes | JavaScript lifecycle option, not a FUSE mount option. |
+| `force` | Disconnected-mount recovery | Yes | Yes | JavaScript lifecycle option, not a FUSE mount option. Healthy mounts are preserved; lazy detach completion is verified with a finite deadline. |
 | `mkdir` | Create missing mount point | Yes | Yes | JavaScript lifecycle option. |
 | `timeout` | JavaScript callback timeout | Yes | Yes | Bounds callbacks and mount startup; per-operation `false` and zero values are preserved. |
 | `name` | Source for `volname` | Rejected | Yes | Requires `displayFolder: true`. |

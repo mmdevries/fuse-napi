@@ -137,6 +137,75 @@ tape('unmount passes the mountpoint as a literal process argument', function (t)
   })
 })
 
+tape('unmount waits until a lazy detach is observable', function (t) {
+  const originalExecFile = childProcess.execFile
+  const filesystem = require('fs')
+  const originalStat = filesystem.stat
+  const indexPath = require.resolve('../')
+  const mountpoint = '/tmp/fuse-napi-delayed-unmount'
+  let mountpointChecks = 0
+
+  childProcess.execFile = function (command, args, options, cb) {
+    process.nextTick(cb, null)
+  }
+  filesystem.stat = function (name, cb) {
+    if (name === mountpoint) {
+      mountpointChecks++
+      const dev = mountpointChecks < 3 ? 2 : 1
+      return process.nextTick(cb, null, { dev })
+    }
+    return process.nextTick(cb, null, { dev: 1 })
+  }
+
+  delete require.cache[indexPath]
+  const IsolatedFuse = require('../')
+  IsolatedFuse.unmount(mountpoint, function (err) {
+    childProcess.execFile = originalExecFile
+    filesystem.stat = originalStat
+    delete require.cache[indexPath]
+
+    t.error(err, 'unmount completes after the mount disappears')
+    t.equal(mountpointChecks, 3, 'mountpoint visibility is polled')
+    t.end()
+  })
+})
+
+tape('unmount wait is bounded and preserves the disconnect cause', function (t) {
+  const originalExecFile = childProcess.execFile
+  const filesystem = require('fs')
+  const originalStat = filesystem.stat
+  const originalNow = Date.now
+  const indexPath = require.resolve('../')
+  const mountpoint = '/tmp/fuse-napi-stuck-unmount'
+  let clockReads = 0
+
+  childProcess.execFile = function (command, args, options, cb) {
+    process.nextTick(cb, null)
+  }
+  filesystem.stat = function (name, cb) {
+    const err = new Error('Transport endpoint is not connected')
+    err.code = 'ENOTCONN'
+    process.nextTick(cb, err)
+  }
+  Date.now = function () {
+    return clockReads++ === 0 ? 0 : 15000
+  }
+
+  delete require.cache[indexPath]
+  const IsolatedFuse = require('../')
+  IsolatedFuse.unmount(mountpoint, function (err) {
+    childProcess.execFile = originalExecFile
+    filesystem.stat = originalStat
+    Date.now = originalNow
+    delete require.cache[indexPath]
+
+    t.equal(err && err.code, 'EFUSEUNMOUNTWAIT', 'detach timeout has a stable error code')
+    t.equal(err && err.cause && err.cause.code, 'ENOTCONN', 'last disconnect error is retained')
+    t.match(err && err.message, /stuck-unmount.*detach/, 'timeout identifies the mountpoint')
+    t.end()
+  })
+})
+
 tape('native mount startup is asynchronous, bounded, and cancellable', function (t) {
   const originalStat = require('fs').stat
   const originalMount = binding.fuse_native_mount
