@@ -65,6 +65,11 @@ tape('release verification requires all four prebuilds', function (t) {
 })
 
 tape('release artifacts retain automated Linux gates and manual macOS validation', function (t) {
+  t.match(ciWorkflow, /\n  workflow_dispatch:\n/, 'standalone CI requires a manual workflow dispatch')
+  t.notOk(
+    /\n  (?:push|pull_request):\n/.test(ciWorkflow),
+    'pushes and pull requests cannot start CI'
+  )
   t.match(ciWorkflow, /\n  workflow_call:\n/, 'the complete CI matrix is reusable by the release workflow')
   t.match(
     releaseWorkflow,

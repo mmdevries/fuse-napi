@@ -199,13 +199,29 @@ const OpcodesAndDefaults = new Map([
   }]
 ])
 const KNOWN_OPERATIONS = new Set([...OpcodesAndDefaults.keys(), ...ENHANCED_OPERATIONS.keys()])
+const OPTION_ALIASES = new Map([
+  ['allow_other', 'allowOther'],
+  ['allow_root', 'allowRoot'],
+  ['auto_unmount', 'autoUnmount'],
+  ['default_permissions', 'defaultPermissions'],
+  ['max_read', 'maxRead'],
+  ['user_id', 'userId'],
+  ['kernel_cache', 'kernelCache'],
+  ['auto_cache', 'autoCache'],
+  ['entry_timeout', 'entryTimeout'],
+  ['attr_timeout', 'attrTimeout'],
+  ['ac_attr_timeout', 'acAttrTimeout'],
+  ['nonempty', 'nonEmpty'],
+  ['direct_io', 'directIo'],
+  ['nopath', 'noPath']
+])
 const KNOWN_OPTIONS = new Set([
   'uid', 'gid', 'timeout', 'displayFolder', 'debug', 'force', 'mkdir',
   'allowOther', 'allowRoot', 'autoUnmount', 'defaultPermissions', 'blkdev',
   'blksize', 'maxRead', 'nonEmpty', 'fd', 'userId', 'fsname', 'subtype',
   'kernelCache', 'autoCache', 'umask', 'entryTimeout', 'attrTimeout',
   'acAttrTimeout', 'noforget', 'remember', 'modules', 'name', 'onError',
-  'maxConcurrency', 'nullPathOk', 'noPath'
+  'maxConcurrency', 'nullPathOk', 'noPath', 'directIo'
 ])
 
 class Fuse extends Nanoresource {
@@ -221,6 +237,7 @@ class Fuse extends Nanoresource {
     if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
       throw new TypeError('Options must be an object')
     }
+    opts = normalizeOptionAliases(opts)
     validateOptions(opts)
     validateOperations(ops)
     if (ops.error !== undefined) {
@@ -321,6 +338,7 @@ class Fuse extends Nanoresource {
     if (this.opts.subtype) options.push('subtype=' + mountString('subtype', this.opts.subtype))
     if (this.opts.kernelCache) options.push('kernel_cache')
     if (this.opts.autoCache) options.push('auto_cache')
+    if (this.opts.directIo) options.push('direct_io')
     if (hasValue('umask')) options.push('umask=' + mountInteger('umask', this.opts.umask))
     if (hasValue('uid')) options.push('uid=' + mountInteger('uid', this.opts.uid))
     if (hasValue('gid')) options.push('gid=' + mountInteger('gid', this.opts.gid))
@@ -1552,7 +1570,7 @@ function validateOptions (opts) {
   const booleanOptions = [
     'displayFolder', 'debug', 'force', 'mkdir', 'allowOther', 'allowRoot',
     'autoUnmount', 'defaultPermissions', 'blkdev', 'kernelCache', 'autoCache',
-    'noforget', 'nonEmpty', 'nullPathOk', 'noPath'
+    'noforget', 'nonEmpty', 'nullPathOk', 'noPath', 'directIo'
   ]
   const numberOptions = ['entryTimeout', 'attrTimeout', 'acAttrTimeout']
   const stringOptions = ['fsname', 'subtype', 'modules', 'name']
@@ -1588,6 +1606,27 @@ function validateOptions (opts) {
   if (opts.onError !== undefined && typeof opts.onError !== 'function') {
     throw new TypeError('onError must be a function')
   }
+}
+
+function normalizeOptionAliases (opts) {
+  let normalized = null
+
+  for (const [alias, canonical] of OPTION_ALIASES) {
+    if (!Object.prototype.hasOwnProperty.call(opts, alias)) continue
+
+    const hasCanonical = Object.prototype.hasOwnProperty.call(opts, canonical)
+    if (hasCanonical && opts[canonical] !== opts[alias]) {
+      throw new TypeError(
+        `FUSE options ${JSON.stringify(canonical)} and ${JSON.stringify(alias)} must not conflict`
+      )
+    }
+
+    if (!normalized) normalized = { ...opts }
+    if (!hasCanonical) normalized[canonical] = opts[alias]
+    delete normalized[alias]
+  }
+
+  return normalized || opts
 }
 
 function validateOperations (ops) {

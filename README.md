@@ -87,6 +87,10 @@ mount privileges on Linux, or an installed and approved macFUSE extension on
 macOS. `npm run test:unit` runs only the non-mounting dependency, errno,
 lifecycle, and option tests.
 
+The GitHub `CI` workflow starts only through **Actions → CI → Run workflow**.
+The manually triggered prebuild workflow can also invoke the same CI matrix
+through its reusable `workflow_call` entry point.
+
 The test suite is green on Linux arm64 with libfuse 2.9.9 and on Apple Silicon
 with macFUSE 5.3.3. Hosted CI is configured to build both macOS architectures
 but cannot load the macFUSE kernel extension. Real macOS mount integration is
@@ -148,6 +152,8 @@ Create a new `Fuse` object.
   debug: false,        // Enable detailed tracing of operations.
   force: false,        // Attempt to unmount before remounting.
   mkdir: false,        // Create the mountpoint before mounting.
+  nonEmpty: false,     // Allow mounting over a non-empty directory.
+  directIo: false,     // Use direct I/O for every opened file.
   timeout: 15000,      // Operation and mount-start timeout in milliseconds.
   maxConcurrency: 4,   // Fixed native request-worker count (1 through 64).
   nullPathOk: false,   // Accept null paths for unlinked handle operations.
@@ -168,6 +174,10 @@ the native worker blocked. Return values, buffer lengths, directory entries,
 extended attributes, statistics, and mount options are validated before they
 cross the native boundary. Unknown option and operation names are rejected so
 configuration mistakes cannot silently change filesystem behavior.
+For mount options with a native snake-case spelling, both the JavaScript name
+and the exact libfuse 2 name are accepted (for example, `nonEmpty`/`nonempty`,
+`directIo`/`direct_io`, and `allowOther`/`allow_other`). Inputs are normalized
+to the JavaScript name, and conflicting aliases are rejected.
 
 The native request loop uses exactly `maxConcurrency` workers instead of
 libfuse 2's dynamically growing multithreaded loop. This bounds native

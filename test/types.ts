@@ -138,6 +138,23 @@ const invalidUtimens: Fuse.OPERATIONS = {
 }
 
 const instance = new Fuse(mountpoint)
+const nativeOptionAliases: Fuse.OPTIONS = {
+  allow_other: true,
+  allow_root: false,
+  auto_unmount: true,
+  default_permissions: true,
+  max_read: 1024,
+  user_id: 501,
+  kernel_cache: true,
+  auto_cache: true,
+  direct_io: true,
+  entry_timeout: 1,
+  attr_timeout: 1,
+  ac_attr_timeout: 1,
+  nonempty: true,
+  nopath: true
+}
+new Fuse(mountpoint, {}, nativeOptionAliases)
 const context: Readonly<Fuse.RequestContext> | null = instance.context()
 const now: number = Fuse.UTIME_NOW
 void context

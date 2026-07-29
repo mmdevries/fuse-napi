@@ -18,6 +18,12 @@ All notable changes to this project are documented here. Releases follow
 
 ### Changed
 
+- Native libfuse 2 option spellings such as `nonempty`, `direct_io`, and
+  `allow_other` are accepted as explicit aliases for their JavaScript names.
+  Aliases are normalized before validation, conflicting values are rejected,
+  and unrelated unknown options remain errors.
+- Standalone CI runs are manual-only; the workflow remains reusable by the
+  manually triggered prebuild workflow.
 - Mount startup is asynchronous and cancellable, operation and option names
   are strictly validated, and unimplemented optional callbacks consistently
   return `ENOSYS`.

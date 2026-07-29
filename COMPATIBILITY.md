@@ -101,6 +101,7 @@ platform mount helper decides whether it is accepted.
 | `subtype` | `subtype=<name>` | Yes | Pass-through | Verify Finder and `mount` output on macOS. |
 | `kernelCache` | `kernel_cache` | Yes | Yes | High-level libfuse option. |
 | `autoCache` | `auto_cache` | Yes | Yes | High-level libfuse option; timestamp correctness matters. |
+| `directIo` | `direct_io` | Yes | Pass-through | Enables direct I/O for every opened file. This is separate from returning `directIO` for one `open` or `create` result. |
 | `umask` | `umask=<mask>` | Yes | Pass-through | Explicit zero is preserved; chmod behavior is covered. |
 | `uid` | `uid=<n>` | Yes | Yes | Explicit zero is preserved; ownership behavior is covered. |
 | `gid` | `gid=<n>` | Yes | Yes | Explicit zero is preserved; ownership behavior is covered. |
@@ -120,6 +121,13 @@ platform mount helper decides whether it is accepted.
 | `maxConcurrency` | Fixed native request-worker count | Yes | Yes | Integer from 1 through 64; defaults to 4 and bounds threads, outstanding callbacks, and request memory. |
 | `nullPathOk` | `flag_nullpath_ok` | Yes | Yes | Allows `null` paths for the FUSE callbacks for which the FUSE 2 contract permits it. |
 | `noPath` | `flag_nopath` | Yes | Yes | Avoids path reconstruction for supported handle-based callbacks; those callbacks must accept a `null` path. |
+
+Exact native libfuse 2 spellings are also accepted for JavaScript options whose
+names differ: `allow_other`, `allow_root`, `auto_unmount`,
+`default_permissions`, `max_read`, `user_id`, `kernel_cache`, `auto_cache`,
+`direct_io`, `entry_timeout`, `attr_timeout`, `ac_attr_timeout`, `nonempty`,
+and `nopath`. They are normalized to the JavaScript names above. Supplying
+both forms with different values is an error.
 
 String-valued mount options reject NUL, comma, backslash, and newline
 characters instead of allowing one JavaScript value to inject additional
