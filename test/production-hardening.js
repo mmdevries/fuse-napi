@@ -105,6 +105,72 @@ tape('bounded workers, Buffer operations, request context, and destroy integrate
   }
 })
 
+tape('repeated bounded-worker cleanup retires joined threads safely', function (t) {
+  if (process.platform !== 'linux') {
+    t.skip('Linux-specific native lifecycle stress')
+    t.end()
+    return
+  }
+
+  t.timeoutAfter(30000)
+  const cycles = 25
+  const requestsPerCycle = 32
+  let handled = 0
+  let completed = 0
+  const handledPaths = new Set()
+
+  run().then(function () {
+    t.equal(completed, cycles * requestsPerCycle, 'every queued stat request completed')
+    t.equal(handledPaths.size, completed, 'every requested path reached the dispatcher')
+    t.ok(handled >= completed, 'the native dispatcher serviced every completed request')
+    t.end()
+  }, function (err) {
+    t.fail(err.stack || err.message)
+    t.end()
+  })
+
+  async function run () {
+    for (let cycle = 0; cycle < cycles; cycle++) {
+      const mnt = createMountpoint()
+      let mounted = false
+      const fuse = new Fuse(mnt, {
+        getattr (name, cb) {
+          if (name === '/') {
+            return process.nextTick(cb, 0, stat({ mode: 'dir', size: 4096 }))
+          }
+          if (!name.startsWith('/request-')) {
+            return process.nextTick(cb, Fuse.ENOENT)
+          }
+          setImmediate(function () {
+            handled++
+            handledPaths.add(name)
+            cb(0, stat({ mode: 'file', size: 0 }))
+          })
+        }
+      }, {
+        force: true,
+        attrTimeout: 0,
+        maxConcurrency: 8
+      })
+
+      try {
+        await deadline(mount(fuse), `mount cycle ${cycle}`)
+        mounted = true
+        const results = await deadline(Promise.all(Array.from({ length: requestsPerCycle }, (_, request) => {
+          return fs.promises.stat(path.join(mnt, `request-${cycle}-${request}`))
+        })), `request cycle ${cycle}`)
+        completed += results.length
+      } finally {
+        try {
+          if (mounted) await deadline(closeImmediately(fuse), `unmount cycle ${cycle}`)
+        } finally {
+          await fs.promises.rmdir(mnt)
+        }
+      }
+    }
+  }
+})
+
 function mount (fuse) {
   return new Promise((resolve, reject) => {
     fuse.mount(err => err ? reject(err) : resolve())
@@ -114,6 +180,12 @@ function mount (fuse) {
 function close (fuse) {
   return new Promise((resolve, reject) => {
     unmount(fuse, err => err ? reject(err) : resolve())
+  })
+}
+
+function closeImmediately (fuse) {
+  return new Promise((resolve, reject) => {
+    fuse.unmount(err => err ? reject(err) : resolve())
   })
 }
 

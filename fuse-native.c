@@ -30,6 +30,7 @@ typedef void (*fuse_dispatch_fn)(uv_async_t *, fuse_thread_locals_t *, fuse_thre
 static void fuse_native_complete_local(fuse_thread_locals_t *l, int32_t result);
 static void fuse_native_release_local_payload(fuse_thread_locals_t *l);
 static void fuse_native_capture_context(fuse_thread_locals_t *l);
+static int fuse_native_schedule_local(fuse_thread_locals_t *l);
 static napi_status create_request_context_value(
   napi_env env,
   const fuse_thread_locals_t *l,
@@ -70,7 +71,7 @@ static napi_status initialize_callback_arguments(
   l->op_fn = fuse_native_dispatch_##name;\
   blk\
   atomic_store(&(l->waiting), 1);\
-  if (uv_async_send(&(l->async)) < 0) {\
+  if (fuse_native_schedule_local(l) < 0) {\
     atomic_store(&(l->waiting), 0);\
     fuse_native_release_local_payload(l);\
     return -EIO;\
@@ -246,6 +247,7 @@ struct fuse_thread_s {
   int attr_initialized;
   int mutex_initialized;
   int workers_sem_initialized;
+  int dispatch_async_initialized;
   int loop_exit_async_initialized;
   atomic_int cleanup_scheduled;
   atomic_int cleanup_requested;
@@ -258,9 +260,12 @@ struct fuse_thread_s {
   size_t workers_started;
   size_t close_pending;
   fuse_thread_locals_t *locals;
+  fuse_thread_locals_t *dispatch_head;
+  fuse_thread_locals_t *dispatch_tail;
   fuse_worker_t *workers;
   napi_async_cleanup_hook_handle cleanup_hook;
 
+  uv_async_t dispatch_async;
   uv_async_t loop_exit_async;
   uv_mutex_t mut;
   uv_sem_t workers_finished;
@@ -333,11 +338,11 @@ struct fuse_thread_locals_s {
   // Internal bookkeeping
   fuse_thread_t *fuse;
   uv_sem_t sem;
-  uv_async_t async;
   int sem_initialized;
-  int async_initialized;
+  int queued;
   atomic_int waiting;
   fuse_thread_locals_t *next;
+  fuse_thread_locals_t *dispatch_next;
 
 };
 
@@ -1232,7 +1237,7 @@ static void fuse_native_destroy (void *data) {
   l->op = op_destroy;
   l->op_fn = fuse_native_dispatch_destroy;
   atomic_store(&(l->waiting), 1);
-  if (uv_async_send(&(l->async)) < 0) {
+  if (fuse_native_schedule_local(l) < 0) {
     atomic_store(&(l->waiting), 0);
     return;
   }
@@ -1614,7 +1619,7 @@ static void * fuse_native_init (struct fuse_conn_info *conn) {
   fuse_native_capture_context(l);
 
   atomic_store(&(l->waiting), 1);
-  if (uv_async_send(&(l->async)) < 0) {
+  if (fuse_native_schedule_local(l) < 0) {
     atomic_store(&(l->waiting), 0);
     return ft;
   }
@@ -1626,21 +1631,104 @@ static void * fuse_native_init (struct fuse_conn_info *conn) {
 
 // Top-level dispatcher
 
-static void fuse_native_dispatch (uv_async_t* handle) {
-  fuse_thread_locals_t *l = (fuse_thread_locals_t *) handle->data;
-  fuse_thread_t *ft = l->fuse;
-  if (atomic_load(&(ft->cleanup_requested)) && l->op != op_destroy) {
-    fuse_native_complete_local(l, -EIO);
-    return;
+static void fuse_native_remove_queued_local_locked (
+  fuse_thread_t *ft,
+  fuse_thread_locals_t *target
+) {
+  fuse_thread_locals_t *previous = NULL;
+  fuse_thread_locals_t *current = ft->dispatch_head;
+
+  while (current != NULL && current != target) {
+    previous = current;
+    current = current->dispatch_next;
   }
-  l->op_fn(handle, l, ft);
+  if (current == NULL) return;
+
+  if (previous == NULL) {
+    ft->dispatch_head = current->dispatch_next;
+  } else {
+    previous->dispatch_next = current->dispatch_next;
+  }
+  if (ft->dispatch_tail == current) ft->dispatch_tail = previous;
+  current->dispatch_next = NULL;
+  current->queued = 0;
+}
+
+static void fuse_native_clear_dispatch_queue_locked (fuse_thread_t *ft) {
+  fuse_thread_locals_t *l = ft->dispatch_head;
+  while (l != NULL) {
+    fuse_thread_locals_t *next = l->dispatch_next;
+    l->dispatch_next = NULL;
+    l->queued = 0;
+    l = next;
+  }
+  ft->dispatch_head = NULL;
+  ft->dispatch_tail = NULL;
+}
+
+static int fuse_native_schedule_local (fuse_thread_locals_t *l) {
+  fuse_thread_t *ft = l->fuse;
+  if (!ft->dispatch_async_initialized ||
+      (atomic_load(&(ft->cleanup_requested)) && l->op != op_destroy)) {
+    return UV_ECANCELED;
+  }
+
+  uv_mutex_lock(&(ft->mut));
+  if (!ft->dispatch_async_initialized ||
+      l->queued ||
+      (atomic_load(&(ft->cleanup_requested)) && l->op != op_destroy)) {
+    uv_mutex_unlock(&(ft->mut));
+    return UV_ECANCELED;
+  }
+
+  l->dispatch_next = NULL;
+  l->queued = 1;
+  if (ft->dispatch_tail == NULL) {
+    ft->dispatch_head = l;
+  } else {
+    ft->dispatch_tail->dispatch_next = l;
+  }
+  ft->dispatch_tail = l;
+  uv_mutex_unlock(&(ft->mut));
+
+  int err = uv_async_send(&(ft->dispatch_async));
+  if (err < 0) {
+    uv_mutex_lock(&(ft->mut));
+    fuse_native_remove_queued_local_locked(ft, l);
+    uv_mutex_unlock(&(ft->mut));
+  }
+  return err;
+}
+
+static void fuse_native_dispatch (uv_async_t* handle) {
+  fuse_thread_t *ft = (fuse_thread_t *) handle->data;
+
+  while (true) {
+    uv_mutex_lock(&(ft->mut));
+    fuse_thread_locals_t *l = ft->dispatch_head;
+    if (l != NULL) {
+      ft->dispatch_head = l->dispatch_next;
+      if (ft->dispatch_head == NULL) ft->dispatch_tail = NULL;
+      l->dispatch_next = NULL;
+      l->queued = 0;
+    }
+    uv_mutex_unlock(&(ft->mut));
+
+    if (l == NULL) return;
+    if (atomic_load(&(l->waiting)) == 0) continue;
+    if (atomic_load(&(ft->cleanup_requested)) && l->op != op_destroy) {
+      fuse_native_complete_local(l, -EIO);
+      continue;
+    }
+    l->op_fn(handle, l, ft);
+  }
 }
 
 static int fuse_native_create_worker_locals (fuse_thread_t *ft) {
   /*
-   * N-API values and libuv handles must be created on the JavaScript thread.
-   * Preallocating one local state per bounded worker also removes the
-   * cross-thread initialization handshake from the request path.
+   * N-API values must be created on the JavaScript thread. Preallocating one
+   * local state per bounded worker also removes the cross-thread
+   * initialization handshake from the request path.
    */
   for (size_t i = 0; i < ft->max_workers; i++) {
     fuse_thread_locals_t *l = calloc(1, sizeof(*l));
@@ -1678,18 +1766,6 @@ static int fuse_native_create_worker_locals (fuse_thread_t *ft) {
       return err;
     }
     l->sem_initialized = 1;
-
-    err = uv_async_init(ft->loop, &(l->async), (uv_async_cb) fuse_native_dispatch);
-    if (err < 0) {
-      uv_sem_destroy(&(l->sem));
-      napi_delete_reference(ft->env, l->self);
-      free(l);
-      napi_close_handle_scope(ft->env, scope);
-      return err;
-    }
-    l->async_initialized = 1;
-    l->async.data = l;
-    uv_unref((uv_handle_t *) &(l->async));
 
     l->next = ft->locals;
     ft->locals = l;
@@ -1767,6 +1843,7 @@ static void* start_fuse_thread (void *data) {
   struct fuse_session *session = fuse_get_session(ft->fuse);
   size_t buffer_size = fuse_chan_bufsize(ft->ch);
   fuse_worker_t *workers = calloc(ft->max_workers, sizeof(*workers));
+  size_t workers_to_join = 0;
 
   if (session == NULL || buffer_size == 0) {
     fuse_native_record_loop_error(ft, -EIO);
@@ -1818,19 +1895,24 @@ static void* start_fuse_thread (void *data) {
         fuse_native_record_loop_error(ft, -EIO);
       }
       fuse_session_exit(session);
-      uv_mutex_lock(&(ft->mut));
-      fuse_native_cancel_workers_locked(ft);
-      uv_mutex_unlock(&(ft->mut));
     } else {
       uv_sem_wait(&(ft->workers_finished));
     }
 
     fuse_session_exit(session);
     uv_mutex_lock(&(ft->mut));
+    workers_to_join = ft->workers_started;
     fuse_native_cancel_workers_locked(ft);
+    /*
+     * Cleanup uses the same mutex before cancelling workers. Retire the
+     * published set before joining it so another cleanup path can never call
+     * pthread_cancel() with a pthread_t that has already been joined.
+     */
+    ft->workers = NULL;
+    ft->workers_started = 0;
     uv_mutex_unlock(&(ft->mut));
 
-    for (size_t i = 0; i < ft->workers_started; i++) {
+    for (size_t i = 0; i < workers_to_join; i++) {
       int result = pthread_join(workers[i].thread, NULL);
       if (result != 0) fuse_native_record_loop_error(ft, -result);
       free(workers[i].buffer);
@@ -1844,8 +1926,6 @@ static void* start_fuse_thread (void *data) {
   struct fuse_chan *ch = ft->ch;
   ft->fuse = NULL;
   ft->ch = NULL;
-  ft->workers = NULL;
-  ft->workers_started = 0;
   uv_mutex_unlock(&(ft->mut));
   free(workers);
 
@@ -1885,8 +1965,30 @@ static void fuse_native_free_strings (fuse_thread_t *ft) {
   ft->mntopts = NULL;
 }
 
+static void fuse_native_free_locals (fuse_thread_t *ft) {
+  fuse_thread_locals_t *l = ft->locals;
+  ft->locals = NULL;
+  ft->dispatch_head = NULL;
+  ft->dispatch_tail = NULL;
+
+  while (l != NULL) {
+    fuse_thread_locals_t *next = l->next;
+    if (l->sem_initialized) {
+      uv_sem_destroy(&(l->sem));
+      l->sem_initialized = 0;
+    }
+    free(l);
+    l = next;
+  }
+}
+
 static void fuse_native_mount_cleanup_finished (fuse_thread_t *ft) {
   ft->mount_cleanup_pending = 0;
+  fuse_native_free_locals(ft);
+  if (ft->mutex_initialized) {
+    uv_mutex_destroy(&(ft->mut));
+    ft->mutex_initialized = 0;
+  }
   if (ft->cleanup_hook != NULL) {
     napi_remove_async_cleanup_hook(ft->cleanup_hook);
     ft->cleanup_hook = NULL;
@@ -1901,13 +2003,6 @@ static void fuse_native_mount_close_complete (fuse_thread_t *ft) {
   if (ft->close_pending == 0) return;
   ft->close_pending--;
   if (ft->close_pending == 0) fuse_native_mount_cleanup_finished(ft);
-}
-
-static void fuse_native_mount_local_closed (uv_handle_t *handle) {
-  fuse_thread_locals_t *l = (fuse_thread_locals_t *) handle->data;
-  fuse_thread_t *ft = l->fuse;
-  free(l);
-  fuse_native_mount_close_complete(ft);
 }
 
 static void fuse_native_mount_thread_async_closed (uv_handle_t *handle) {
@@ -1957,21 +2052,15 @@ static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
   }
 
   /*
-   * ft is backed by a JavaScript Buffer and contains loop_exit_async inline.
-   * Each worker local owns another inline uv_async_t. Keep state_ref alive
-   * until every close callback has run; releasing it earlier makes libuv
-   * operate on reclaimable storage after a failed mount.
+   * ft is backed by a JavaScript Buffer and contains both async handles inline.
+   * Keep state_ref alive until both close callbacks have run; releasing it
+   * earlier makes libuv operate on reclaimable storage after a failed mount.
    */
   ft->close_pending = 0;
-  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
-    if (l->async_initialized) ft->close_pending++;
-  }
+  if (ft->dispatch_async_initialized) ft->close_pending++;
   if (ft->loop_exit_async_initialized) ft->close_pending++;
 
-  fuse_thread_locals_t *l = ft->locals;
-  ft->locals = NULL;
-  while (l != NULL) {
-    fuse_thread_locals_t *next = l->next;
+  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
     if (l->self != NULL) {
       napi_delete_reference(ft->env, l->self);
       l->self = NULL;
@@ -1980,14 +2069,15 @@ static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
       uv_sem_destroy(&(l->sem));
       l->sem_initialized = 0;
     }
-    if (l->async_initialized) {
-      l->async_initialized = 0;
-      l->async.data = l;
-      uv_close((uv_handle_t *) &(l->async), fuse_native_mount_local_closed);
-    } else {
-      free(l);
-    }
-    l = next;
+  }
+
+  if (ft->dispatch_async_initialized) {
+    ft->dispatch_async.data = ft;
+    uv_close(
+      (uv_handle_t *) &(ft->dispatch_async),
+      fuse_native_mount_thread_async_closed
+    );
+    ft->dispatch_async_initialized = 0;
   }
 
   if (ft->loop_exit_async_initialized) {
@@ -2001,10 +2091,6 @@ static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
   if (ft->workers_sem_initialized) {
     uv_sem_destroy(&(ft->workers_finished));
     ft->workers_sem_initialized = 0;
-  }
-  if (ft->mutex_initialized) {
-    uv_mutex_destroy(&(ft->mut));
-    ft->mutex_initialized = 0;
   }
   if (ft->attr_initialized) {
     pthread_attr_destroy(&(ft->attr));
@@ -2113,13 +2199,6 @@ static void fuse_native_report_cleanup_failure (fuse_thread_t *ft) {
   napi_close_handle_scope(ft->env, scope);
 }
 
-static void fuse_native_local_closed (uv_handle_t *handle) {
-  fuse_thread_locals_t *l = (fuse_thread_locals_t *) handle->data;
-  fuse_thread_t *ft = l->fuse;
-  free(l);
-  if (--ft->close_pending == 0) fuse_native_finish_cleanup(ft);
-}
-
 static void fuse_native_thread_async_closed (uv_handle_t *handle) {
   fuse_thread_t *ft = (fuse_thread_t *) handle->data;
   if (--ft->close_pending == 0) fuse_native_finish_cleanup(ft);
@@ -2128,7 +2207,11 @@ static void fuse_native_thread_async_closed (uv_handle_t *handle) {
 static void fuse_native_finish_cleanup (fuse_thread_t *ft) {
   ft->mounted = 0;
   ft->thread_started = 0;
-  ft->locals = NULL;
+  fuse_native_free_locals(ft);
+  if (ft->mutex_initialized) {
+    uv_mutex_destroy(&(ft->mut));
+    ft->mutex_initialized = 0;
+  }
   fuse_native_free_strings(ft);
 
   if (ft->cleanup_hook != NULL) {
@@ -2214,10 +2297,6 @@ static void fuse_native_cleanup_work (uv_work_t *request) {
     if (err != 0 && ft->cleanup_error == 0) ft->cleanup_error = err;
     ft->attr_initialized = 0;
   }
-  if (ft->mutex_initialized) {
-    uv_mutex_destroy(&(ft->mut));
-    ft->mutex_initialized = 0;
-  }
 }
 
 static void fuse_native_cleanup_after (uv_work_t *request, int status) {
@@ -2239,15 +2318,20 @@ static void fuse_native_cleanup_after (uv_work_t *request, int status) {
       napi_delete_reference(ft->env, l->self);
       l->self = NULL;
     }
-    if (l->async_initialized) ft->close_pending++;
   }
+  if (ft->dispatch_async_initialized) ft->close_pending++;
   if (ft->loop_exit_async_initialized) ft->close_pending++;
 
-  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
-    if (l->async_initialized) {
-      l->async_initialized = 0;
-      uv_close((uv_handle_t *) &(l->async), fuse_native_local_closed);
-    }
+  if (ft->mutex_initialized) {
+    uv_mutex_lock(&(ft->mut));
+    fuse_native_clear_dispatch_queue_locked(ft);
+    uv_mutex_unlock(&(ft->mut));
+  }
+
+  if (ft->dispatch_async_initialized) {
+    ft->dispatch_async_initialized = 0;
+    ft->dispatch_async.data = ft;
+    uv_close((uv_handle_t *) &(ft->dispatch_async), fuse_native_thread_async_closed);
   }
   if (ft->loop_exit_async_initialized) {
     ft->loop_exit_async_initialized = 0;
@@ -2270,6 +2354,12 @@ static int fuse_native_begin_cleanup (fuse_thread_t *ft, int env_cleanup) {
     uv_mutex_lock(&(ft->mut));
     if (ft->fuse != NULL) fuse_exit(ft->fuse);
     if (ft->workers != NULL) fuse_native_cancel_workers_locked(ft);
+    /*
+     * cleanup_requested prevents new non-destroy submissions. Remove any
+     * request that has not reached JavaScript before waking its worker so the
+     * controller can later reuse a local for the mandatory destroy callback.
+     */
+    fuse_native_clear_dispatch_queue_locked(ft);
     uv_mutex_unlock(&(ft->mut));
   }
 
@@ -2591,6 +2681,16 @@ NAPI_METHOD(fuse_native_mount) {
   err = uv_sem_init(&(ft->workers_finished), 0);
   if (err < 0) goto mount_failed;
   ft->workers_sem_initialized = 1;
+
+  err = uv_async_init(
+    ft->loop,
+    &(ft->dispatch_async),
+    (uv_async_cb) fuse_native_dispatch
+  );
+  if (err < 0) goto mount_failed;
+  ft->dispatch_async_initialized = 1;
+  ft->dispatch_async.data = ft;
+  uv_unref((uv_handle_t *) &(ft->dispatch_async));
 
   err = uv_async_init(
     ft->loop,

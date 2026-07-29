@@ -24,9 +24,15 @@ All notable changes to this project are documented here. Releases follow
 - Native teardown, cancellation, request ownership, callback deadlines, and
   64-bit/timestamp validation have been hardened for deterministic failure
   behavior.
-- Worker-local request state is initialized before native threads start, and
-  failed mounts retain their backing storage until every libuv handle closes,
-  preventing teardown deadlocks and use-after-free crashes.
+- Worker-local request state is initialized before native threads start and
+  submitted through one mutex-protected dispatch queue. Coalesced wakeups are
+  drained completely, pending entries are retired before the FUSE `destroy`
+  callback, and failed mounts retain their backing storage until both shared
+  libuv handles close, preventing teardown deadlocks and use-after-close
+  crashes.
+- Worker thread identifiers are retired under the cleanup mutex before their
+  threads are joined, preventing concurrent teardown from cancelling a stale
+  `pthread_t`.
 
 ## 1.0.0 - 2026-07-28
 
