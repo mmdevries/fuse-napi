@@ -24,12 +24,11 @@ All notable changes to this project are documented here. Releases follow
 - Native teardown, cancellation, request ownership, callback deadlines, and
   64-bit/timestamp validation have been hardened for deterministic failure
   behavior.
-- Worker-local request state is initialized before native threads start and
-  submitted through one mutex-protected dispatch queue. Coalesced wakeups are
-  drained completely, pending entries are retired before the FUSE `destroy`
-  callback, and failed mounts retain their backing storage until both shared
-  libuv handles close, preventing teardown deadlocks and use-after-close
-  crashes.
+- Worker-local request state and one dedicated libuv dispatcher per bounded
+  worker are initialized before native threads start. This preserves a
+  one-request/one-wakeup invariant across Node.js versions, while failed
+  mounts retain all dispatcher backing storage until every close callback has
+  completed.
 - Worker thread identifiers are retired under the cleanup mutex before their
   threads are joined, preventing concurrent teardown from cancelling a stale
   `pthread_t`.

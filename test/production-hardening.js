@@ -105,7 +105,7 @@ tape('bounded workers, Buffer operations, request context, and destroy integrate
   }
 })
 
-tape('repeated bounded-worker cleanup retires joined threads safely', function (t) {
+tape('repeated bounded-worker dispatch and cleanup remain lossless', function (t) {
   if (process.platform !== 'linux') {
     t.skip('Linux-specific native lifecycle stress')
     t.end()
@@ -150,6 +150,8 @@ tape('repeated bounded-worker cleanup retires joined threads safely', function (
       }, {
         force: true,
         attrTimeout: 0,
+        // More than one worker exercises the one-dispatcher-per-worker
+        // invariant while each cycle also tears the complete pool down.
         maxConcurrency: 8
       })
 
