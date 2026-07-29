@@ -2,6 +2,7 @@ const os = require('os')
 const fs = require('fs')
 const path = require('path')
 const { execFile } = require('child_process')
+const { AsyncLocalStorage } = require('async_hooks')
 
 const Nanoresource = require('nanoresource')
 const loadBinding = require('node-gyp-build')
@@ -18,26 +19,36 @@ try {
 const OSX_FOLDER_ICON = '/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericFolderIcon.icns'
 const HAS_FOLDER_ICON = IS_OSX && fs.existsSync(OSX_FOLDER_ICON)
 const DEFAULT_TIMEOUT = 15 * 1000
+const DEFAULT_MAX_CONCURRENCY = 4
+const MAX_MAX_CONCURRENCY = 64
 const MAX_INT32 = 0x7fffffff
 const MIN_INT32 = -0x80000000
+const UTIME_NOW = 0x3fffffff
+const UTIME_OMIT = 0x3ffffffe
+const OPERATION_FLAG_NULL_PATH_OK = 1
+const OPERATION_FLAG_NO_PATH = 2
+const OPERATION_FLAG_UTIME_OMIT_OK = 4
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER)
 const XATTR_NOT_FOUND = -(os.constants.errno.ENOATTR || os.constants.errno.ENODATA || 61)
-const EMPTY_INIT_CONFIG = new Uint32Array(6)
+const EMPTY_INIT_CONFIG = new Uint32Array(7)
 const FILE_INFO_DIRECT_IO = 1
 const FILE_INFO_KEEP_CACHE = 2
 const FILE_INFO_NONSEEKABLE = 4
 const FILE_INFO_RESULT_FIELDS = new Set(['fd', 'directIO', 'keepCache', 'nonseekable'])
+const requestContexts = new AsyncLocalStorage()
 const INIT_CONFIG_FIELDS = new Map([
   ['maxWrite', { index: 1, mask: 1, minimum: 1 }],
   ['maxReadahead', { index: 2, mask: 2, minimum: 0 }],
   ['maxBackground', { index: 3, mask: 4, minimum: 1 }],
   ['congestionThreshold', { index: 4, mask: 8, minimum: 1 }],
-  ['want', { index: 5, mask: 16, minimum: 0 }]
+  ['want', { index: 5, mask: 16, minimum: 0 }],
+  ['asyncRead', { index: 6, mask: 32, boolean: true }]
 ])
 const ENHANCED_OPERATIONS = new Map([
   ['initWithConfig', binding.op_init],
   ['readdirPaged', binding.op_readdir],
-  ['createWithFlags', binding.op_create]
+  ['createWithFlags', binding.op_create],
+  ['utimensWithTimespec', binding.op_utimens]
 ])
 
 const OpcodesAndDefaults = new Map([
@@ -154,7 +165,47 @@ const OpcodesAndDefaults = new Map([
   }],
   ['rmdir', {
     op: binding.op_rmdir
+  }],
+  ['destroy', {
+    op: binding.op_destroy
+  }],
+  ['lock', {
+    op: binding.op_lock
+  }],
+  ['bmap', {
+    op: binding.op_bmap
+  }],
+  ['ioctl', {
+    op: binding.op_ioctl
+  }],
+  ['poll', {
+    op: binding.op_poll,
+    defaults: [0]
+  }],
+  ['writeBuffer', {
+    op: binding.op_write_buf,
+    nativeName: 'write_buf'
+  }],
+  ['readBuffer', {
+    op: binding.op_read_buf,
+    nativeName: 'read_buf',
+    defaults: [Buffer.alloc(0)]
+  }],
+  ['flock', {
+    op: binding.op_flock
+  }],
+  ['fallocate', {
+    op: binding.op_fallocate
   }]
+])
+const KNOWN_OPERATIONS = new Set([...OpcodesAndDefaults.keys(), ...ENHANCED_OPERATIONS.keys()])
+const KNOWN_OPTIONS = new Set([
+  'uid', 'gid', 'timeout', 'displayFolder', 'debug', 'force', 'mkdir',
+  'allowOther', 'allowRoot', 'autoUnmount', 'defaultPermissions', 'blkdev',
+  'blksize', 'maxRead', 'nonEmpty', 'fd', 'userId', 'fsname', 'subtype',
+  'kernelCache', 'autoCache', 'umask', 'entryTimeout', 'attrTimeout',
+  'acAttrTimeout', 'noforget', 'remember', 'modules', 'name', 'onError',
+  'maxConcurrency', 'nullPathOk', 'noPath'
 ])
 
 class Fuse extends Nanoresource {
@@ -171,6 +222,7 @@ class Fuse extends Nanoresource {
       throw new TypeError('Options must be an object')
     }
     validateOptions(opts)
+    validateOperations(ops)
     if (ops.error !== undefined) {
       throw new TypeError('Operation "error" is not a FUSE 2 operation and is not supported')
     }
@@ -188,23 +240,40 @@ class Fuse extends Nanoresource {
     for (const [legacy, enhanced] of [
       ['init', 'initWithConfig'],
       ['readdir', 'readdirPaged'],
-      ['create', 'createWithFlags']
+      ['create', 'createWithFlags'],
+      ['utimens', 'utimensWithTimespec'],
+      ['read', 'readBuffer'],
+      ['write', 'writeBuffer']
     ]) {
       if (ops[legacy] && ops[enhanced]) {
         throw new TypeError(`Operations ${JSON.stringify(legacy)} and ${JSON.stringify(enhanced)} are mutually exclusive`)
       }
     }
 
-    this.opts = opts
+    const timeout = normalizeTimeoutOption(opts.timeout)
+    this.opts = Object.freeze({
+      ...opts,
+      timeout: timeout && typeof timeout === 'object'
+        ? Object.freeze({ ...timeout })
+        : timeout
+    })
     this.mnt = path.resolve(mnt)
-    this.ops = ops
-    this.timeout = normalizeTimeoutOption(opts.timeout)
+    this.ops = Object.freeze({ ...ops })
+    this.timeout = this.opts.timeout
+    this.maxConcurrency = this.opts.maxConcurrency === undefined
+      ? DEFAULT_MAX_CONCURRENCY
+      : boundedInteger('maxConcurrency', this.opts.maxConcurrency, 1, MAX_MAX_CONCURRENCY)
+    this._operationFlags =
+      (this.opts.nullPathOk ? OPERATION_FLAG_NULL_PATH_OK : 0) |
+      (this.opts.noPath ? OPERATION_FLAG_NO_PATH : 0) |
+      (this.ops.utimensWithTimespec ? OPERATION_FLAG_UTIME_OMIT_OK : 0)
 
-    this._force = !!opts.force
-    this._mkdir = !!opts.mkdir
+    this._force = !!this.opts.force
+    this._mkdir = !!this.opts.mkdir
     this._thread = null
     this._mountpointDev = null
     this._nativeMounted = false
+    this._nativeMountPending = false
     this._startupTimer = null
     this._tearingDown = false
     this._teardownCallbacks = []
@@ -212,12 +281,12 @@ class Fuse extends Nanoresource {
     this._handlers = this._makeHandlerArray()
 
     const implemented = [binding.op_init, binding.op_getattr]
-    if (ops) {
+    if (this.ops) {
       for (const [name, { op }] of OpcodesAndDefaults) {
-        if (ops[name] && this._handlers[op]) implemented.push(op)
+        if (this.ops[name] && this._handlers[op]) implemented.push(op)
       }
       for (const [name, op] of ENHANCED_OPERATIONS) {
-        if (ops[name] && this._handlers[op]) implemented.push(op)
+        if (this.ops[name] && this._handlers[op]) implemented.push(op)
       }
     }
     this._implemented = new Set(implemented)
@@ -275,26 +344,30 @@ class Fuse extends Nanoresource {
     const self = this
     const handlers = new Array(OpcodesAndDefaults.size)
 
-    for (const [name, { op, defaults }] of OpcodesAndDefaults) {
-      const nativeSignal = binding[`fuse_native_signal_${name}`]
+    for (const [name, { op, defaults, nativeName }] of OpcodesAndDefaults) {
+      const internalName = nativeName || name
+      const nativeSignal = binding[`fuse_native_signal_${internalName}`]
       if (!nativeSignal) continue
 
-      handlers[op] = makeHandler(name, op, defaults, nativeSignal)
+      handlers[op] = makeHandler(name, internalName, op, defaults, nativeSignal)
     }
 
     return handlers
 
-    function makeHandler (name, op, defaults, nativeSignal) {
+    function makeHandler (name, internalName, op, defaults, nativeSignal) {
       const to = operationTimeout(self.timeout, name)
 
       return function (nativeHandler, opCode, ...args) {
+        const context = extractRequestContext(args)
         const sig = signal.bind(null, nativeHandler)
         const input = [...args]
         const boundSignal = onceSignal(sig, input)
-        const funcName = `_op_${name}`
-        if (!self[funcName] || !self._implemented.has(op)) return boundSignal(-1, ...defaults)
+        const funcName = `_op_${internalName}`
+        if (!self[funcName] || !self._implemented.has(op)) return boundSignal(Fuse.ENOSYS, ...defaults)
         try {
-          const result = self[funcName].apply(self, [boundSignal, ...args])
+          const result = requestContexts.run(context, () => {
+            return self[funcName].apply(self, [boundSignal, ...args])
+          })
           if (result && typeof result.then === 'function') {
             result.catch(err => failOperation(err, boundSignal, input))
           }
@@ -320,6 +393,7 @@ class Fuse extends Nanoresource {
         let called = false
         const timeout = to ? setTimeout(signalOnce, to, Fuse.ETIMEDOUT) : null
         signalOnce.cancel = () => failSignal(Fuse.EIO)
+        signalOnce.operation = name
         self._pendingSignals.add(signalOnce)
         return signalOnce
 
@@ -382,6 +456,11 @@ class Fuse extends Nanoresource {
     return open()
 
     function open () {
+      if (self._nativeMountPending) {
+        const err = new Error('A previous native FUSE mount cancellation is still pending')
+        err.code = 'EFUSEMOUNTBUSY'
+        return process.nextTick(cb, err)
+      }
       self._thread = Buffer.alloc(binding.sizeof_fuse_thread_t)
       self._openCallback = cb
 
@@ -416,10 +495,22 @@ class Fuse extends Nanoresource {
           if (parent.dev !== stat.dev) return self._completeOpen(new Error('Mountpoint in use'))
           self._mountpointDev = stat.dev
           self._startMountTimer()
+          self._nativeMountPending = true
           try {
-            binding.fuse_native_mount(self.mnt, opts, self._thread, self, self._handlers, implemented)
-            self._nativeMounted = true
+            binding.fuse_native_mount(
+              self.mnt,
+              opts,
+              self._thread,
+              self,
+              self._handlers,
+              implemented,
+              self.maxConcurrency,
+              self._operationFlags,
+              self._nativeLoopExited.bind(self),
+              self._nativeMountComplete.bind(self)
+            )
           } catch (err) {
+            self._nativeMountPending = false
             return self._completeOpen(err)
           }
         })
@@ -429,6 +520,31 @@ class Fuse extends Nanoresource {
 
   _close (cb) {
     this._teardown(null, cb)
+  }
+
+  _nativeMountComplete (err) {
+    this._nativeMountPending = false
+    if (!this._openCallback) {
+      this._thread = null
+      return
+    }
+    if (err) return this._completeOpen(err)
+    this._nativeMounted = true
+  }
+
+  _nativeLoopExited (nativeResult) {
+    if (this._tearingDown || !this._nativeMounted) return
+    const err = new Error(nativeResult < 0
+      ? `The FUSE request loop terminated unexpectedly with native result ${nativeResult}`
+      : 'The FUSE request loop terminated unexpectedly')
+    err.code = 'EFUSELOOPEXIT'
+    err.nativeResult = nativeResult
+
+    if (this._openCallback) return this._failOpen(err)
+    this._reportOperationError(err, 'lifecycle', [])
+    this.close(closeError => {
+      if (closeError) this._reportOperationError(closeError, 'cleanup', [])
+    })
   }
 
   // Handlers
@@ -519,6 +635,14 @@ class Fuse extends Nanoresource {
   _failOpen (err) {
     if (!this._openCallback) return
     this._clearMountTimer()
+    if (this._nativeMountPending) {
+      try {
+        binding.fuse_native_cancel_mount(this._thread)
+      } catch (cancelError) {
+        this._reportOperationError(cancelError, 'mount-cancel', [this.mnt])
+      }
+      return this._completeOpen(err)
+    }
     if (!this._nativeMounted) return this._completeOpen(err)
     this._teardown(err, cleanupErr => this._completeOpen(cleanupErr || err))
   }
@@ -529,24 +653,39 @@ class Fuse extends Nanoresource {
     if (this._tearingDown) return
     this._tearingDown = true
 
-    const finish = cleanupError => {
+    const finish = (nativeError, unmountError) => {
       this._clearMountTimer()
-      this._nativeMounted = false
-      this._thread = null
       this._tearingDown = false
+
+      const cleanupComplete = !nativeError || nativeError.cleanupComplete === true
+      if (cleanupComplete) {
+        this._nativeMounted = false
+        this._thread = null
+      }
+      if (unmountError) {
+        this._reportOperationError(unmountError, 'unmount', [this.mnt])
+      }
+      if (nativeError && unmountError && !nativeError.unmountError) {
+        nativeError.unmountError = unmountError
+      }
 
       const callbacks = this._teardownCallbacks
       this._teardownCallbacks = []
+      if (nativeError && callbacks.some(entry => entry.primaryError)) {
+        this._reportOperationError(nativeError, 'cleanup', [this.mnt])
+      }
       for (const entry of callbacks) {
-        const err = entry.primaryError || cleanupError || null
+        const err = entry.primaryError || nativeError || null
         process.nextTick(entry.cb, err)
       }
     }
 
-    if (!this._nativeMounted || !this._thread) return finish(null)
+    if (!this._nativeMounted || !this._thread) return finish(null, null)
 
     const cancelPending = () => {
-      for (const signal of [...this._pendingSignals]) signal.cancel()
+      for (const signal of [...this._pendingSignals]) {
+        if (signal.operation !== 'destroy') signal.cancel()
+      }
     }
     cancelPending()
 
@@ -556,10 +695,10 @@ class Fuse extends Nanoresource {
 
       try {
         binding.fuse_native_unmount(this._thread, nativeError => {
-          finish(unmountError || nativeError || null)
+          finish(nativeError || null, unmountError || null)
         })
       } catch (nativeError) {
-        finish(unmountError || nativeError)
+        finish(nativeError, unmountError || null)
       }
     })
   }
@@ -683,12 +822,34 @@ class Fuse extends Nanoresource {
     return this.ops.create(path, mode, complete)
   }
 
-  _op_utimens (signal, path, atimeLow, atimeHigh, mtimeLow, mtimeHigh) {
-    const atime = getSignedDoubleArg(atimeLow, atimeHigh)
-    const mtime = getSignedDoubleArg(mtimeLow, mtimeHigh)
-    return this.ops.utimens(path, atime, mtime, err => {
+  _op_utimens (
+    signal,
+    path,
+    atimeSecondsLow,
+    atimeSecondsHigh,
+    atimeNanoseconds,
+    mtimeSecondsLow,
+    mtimeSecondsHigh,
+    mtimeNanoseconds
+  ) {
+    const atime = decodeTimespec(atimeSecondsLow, atimeSecondsHigh, atimeNanoseconds)
+    const mtime = decodeTimespec(mtimeSecondsLow, mtimeSecondsHigh, mtimeNanoseconds)
+    const complete = err => {
       return signal(err)
-    })
+    }
+    if (this.ops.utimensWithTimespec) {
+      return this.ops.utimensWithTimespec(path, atime, mtime, complete)
+    }
+    if (atime.nanoseconds === UTIME_NOW || atime.nanoseconds === UTIME_OMIT ||
+        mtime.nanoseconds === UTIME_NOW || mtime.nanoseconds === UTIME_OMIT) {
+      return signal(Fuse.EOPNOTSUPP)
+    }
+    return this.ops.utimens(
+      path,
+      timespecToMilliseconds(atime),
+      timespecToMilliseconds(mtime),
+      complete
+    )
   }
 
   _op_release (signal, path, fd) {
@@ -892,6 +1053,124 @@ class Fuse extends Nanoresource {
     })
   }
 
+  _op_destroy (signal) {
+    return this.ops.destroy(err => signal(err))
+  }
+
+  _op_lock (
+    signal,
+    path,
+    fd,
+    command,
+    type,
+    whence,
+    startLow,
+    startHigh,
+    lengthLow,
+    lengthHigh,
+    pid
+  ) {
+    const lock = Object.freeze({
+      type,
+      whence,
+      start: getSignedDoubleArg(startLow, startHigh),
+      length: getSignedDoubleArg(lengthLow, lengthHigh),
+      pid
+    })
+    return this.ops.lock(path, fd, command, lock, (err, result) => {
+      if (err) return signal(err)
+      return this._respond(signal, 'lock', [], () => signal(0, encodeLock(result || lock)))
+    })
+  }
+
+  _op_bmap (signal, path, blockSize, index) {
+    return this.ops.bmap(path, blockSize, index, (err, result) => {
+      if (err) return signal(err)
+      return this._respond(signal, 'bmap', [], () => {
+        return signal(0, toUint64Value(result ?? index, 'bmap index'))
+      })
+    })
+  }
+
+  _op_ioctl (signal, path, fd, command, argument, flags, data) {
+    return this.ops.ioctl(path, fd, command, argument, flags, data, (err, output) => {
+      if (err) return signal(err)
+      return this._respond(signal, 'ioctl', [data], () => {
+        if (output === undefined || output === null) output = data
+        if (!Buffer.isBuffer(output) || output.length !== data.length) {
+          throw new RangeError('ioctl output must be a Buffer with the same length as its input')
+        }
+        return signal(0, output)
+      })
+    })
+  }
+
+  _op_poll (signal, path, fd) {
+    return this.ops.poll(path, fd, (err, events) => {
+      if (err) return signal(err)
+      return this._respond(signal, 'poll', [], () => {
+        return signal(0, toUint32(events ?? 0, 'poll events'))
+      })
+    })
+  }
+
+  _op_write_buf (signal, path, fd, buffer, length, offsetLow, offsetHigh) {
+    return this.ops.writeBuffer(
+      path,
+      fd,
+      buffer,
+      length,
+      getSignedDoubleArg(offsetLow, offsetHigh),
+      result => {
+        return this._respond(signal, 'writeBuffer', [], () => {
+          return signal(normalizeIOResult(result, length))
+        })
+      }
+    )
+  }
+
+  _op_read_buf (signal, path, fd, length, offsetLow, offsetHigh) {
+    return this.ops.readBuffer(
+      path,
+      fd,
+      length,
+      getSignedDoubleArg(offsetLow, offsetHigh),
+      (err, buffer) => {
+        if (err) return signal(err)
+        return this._respond(signal, 'readBuffer', [Buffer.alloc(0)], () => {
+          if (!Buffer.isBuffer(buffer) || buffer.length > length) {
+            throw new RangeError('readBuffer must return a Buffer no larger than the requested length')
+          }
+          return signal(0, buffer)
+        })
+      }
+    )
+  }
+
+  _op_flock (signal, path, fd, operation) {
+    return this.ops.flock(path, fd, operation, err => signal(err))
+  }
+
+  _op_fallocate (
+    signal,
+    path,
+    fd,
+    mode,
+    offsetLow,
+    offsetHigh,
+    lengthLow,
+    lengthHigh
+  ) {
+    return this.ops.fallocate(
+      path,
+      fd,
+      mode,
+      getSignedDoubleArg(offsetLow, offsetHigh),
+      getSignedDoubleArg(lengthLow, lengthHigh),
+      err => signal(err)
+    )
+  }
+
   // Public API
 
   mount (cb) {
@@ -900,6 +1179,10 @@ class Fuse extends Nanoresource {
 
   unmount (cb) {
     return this.close(cb)
+  }
+
+  context () {
+    return requestContexts.getStore() || null
   }
 
   errno (code) {
@@ -1032,6 +1315,8 @@ Fuse.EREMOTEIO = -121
 Fuse.EDQUOT = -122
 Fuse.ENOMEDIUM = -123
 Fuse.EMEDIUMTYPE = -124
+Fuse.UTIME_NOW = UTIME_NOW
+Fuse.UTIME_OMIT = UTIME_OMIT
 
 for (const [name, value] of Object.entries(os.constants.errno)) {
   Fuse[name] = -value
@@ -1103,30 +1388,125 @@ function getSignedDoubleArg (low, high) {
   return value
 }
 
-function toDateMS (st) {
-  if (typeof st === 'number') return st
-  if (typeof st === 'bigint') return st
-  if (st === undefined || st === null) return 0
-  if (!(st instanceof Date) || Number.isNaN(st.getTime())) throw new TypeError('Stat timestamps must be valid Dates or integer milliseconds')
-  return st.getTime()
+function extractRequestContext (args) {
+  const encoded = args[args.length - 1]
+  if (!(encoded instanceof Uint32Array) || encoded.length !== 11) return null
+  args.pop()
+  const fileInfoFlags = encoded[6]
+  const fileInfo = encoded[4] === 0
+    ? null
+    : Object.freeze({
+        flags: encoded[5] | 0,
+        writepage: (fileInfoFlags & 1) !== 0,
+        directIO: (fileInfoFlags & 2) !== 0,
+        keepCache: (fileInfoFlags & 4) !== 0,
+        flush: (fileInfoFlags & 8) !== 0,
+        nonseekable: (fileInfoFlags & 16) !== 0,
+        flockRelease: (fileInfoFlags & 32) !== 0,
+        fd: getUnsignedDoubleArg(encoded[7], encoded[8]),
+        lockOwner: getUnsignedDoubleArg(encoded[9], encoded[10])
+      })
+  return Object.freeze({
+    uid: encoded[0],
+    gid: encoded[1],
+    pid: encoded[2],
+    umask: encoded[3],
+    fileInfo
+  })
+}
+
+function getUnsignedDoubleArg (low, high) {
+  const value = (BigInt(high) << 32n) | BigInt(low)
+  return value <= MAX_SAFE_BIGINT ? Number(value) : value
+}
+
+function decodeTimespec (secondsLow, secondsHigh, nanoseconds) {
+  if (!Number.isInteger(nanoseconds) ||
+      (nanoseconds > 999999999 && nanoseconds !== UTIME_NOW && nanoseconds !== UTIME_OMIT) ||
+      nanoseconds < 0) {
+    throw new RangeError('Native FUSE timespec nanoseconds are outside the valid range')
+  }
+  return Object.freeze({
+    seconds: getSignedDoubleArg(secondsLow, secondsHigh),
+    nanoseconds
+  })
+}
+
+function timespecToMilliseconds (timespec) {
+  if (timespec.nanoseconds === UTIME_NOW || timespec.nanoseconds === UTIME_OMIT) {
+    throw new RangeError('UTIME_NOW and UTIME_OMIT require utimensWithTimespec')
+  }
+  const seconds = typeof timespec.seconds === 'bigint'
+    ? timespec.seconds
+    : BigInt(timespec.seconds)
+  const milliseconds = (seconds * 1000n) + BigInt(Math.trunc(timespec.nanoseconds / 1000000))
+  return milliseconds >= -MAX_SAFE_BIGINT && milliseconds <= MAX_SAFE_BIGINT
+    ? Number(milliseconds)
+    : milliseconds
+}
+
+function normalizeTimespec (value, name) {
+  if (value === undefined || value === null) {
+    return { seconds: 0n, nanoseconds: 0 }
+  }
+
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw new TypeError(`${name} must be a valid Date`)
+    value = value.getTime()
+  }
+
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    const milliseconds = toInt64(value, `${name} milliseconds`)
+    let seconds = milliseconds / 1000n
+    let remainder = milliseconds % 1000n
+    if (remainder < 0n) {
+      seconds--
+      remainder += 1000n
+    }
+    return {
+      seconds,
+      nanoseconds: Number(remainder) * 1000000
+    }
+  }
+
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${name} must be a Date, integer milliseconds, or a timespec object`)
+  }
+  for (const field of Reflect.ownKeys(value)) {
+    if (field !== 'seconds' && field !== 'nanoseconds') {
+      throw new TypeError(`Unknown ${name} property ${String(field)}`)
+    }
+  }
+  const seconds = toInt64(value.seconds ?? 0, `${name}.seconds`)
+  const nanoseconds = value.nanoseconds ?? 0
+  if (!Number.isInteger(nanoseconds) || nanoseconds < 0 || nanoseconds > 999999999) {
+    throw new RangeError(`${name}.nanoseconds must be an integer from 0 through 999999999`)
+  }
+  return { seconds, nanoseconds }
+}
+
+function setTimespec (arr, idx, value, name) {
+  const timespec = normalizeTimespec(value, name)
+  setInt64(arr, idx, timespec.seconds, `${name}.seconds`)
+  arr[idx + 2] = timespec.nanoseconds
 }
 
 function getStatArray (stat) {
-  const ints = new Uint32Array(23)
+  const ints = new Uint32Array(26)
 
   ints[0] = toUint32(stat && stat.mode, 'stat.mode')
   ints[1] = toUint32(stat && stat.uid, 'stat.uid')
   ints[2] = toUint32(stat && stat.gid, 'stat.gid')
-  setUint64(ints, 3, (stat && stat.size) ?? 0, 'stat.size')
+  setNonNegativeInt64(ints, 3, (stat && stat.size) ?? 0, 'stat.size')
   setUint64(ints, 5, (stat && stat.dev) ?? 0, 'stat.dev')
   setUint64(ints, 7, (stat && stat.nlink) ?? 1, 'stat.nlink')
   setUint64(ints, 9, (stat && stat.ino) ?? 0, 'stat.ino')
   setUint64(ints, 11, (stat && stat.rdev) ?? 0, 'stat.rdev')
   setUint64(ints, 13, (stat && stat.blksize) ?? 0, 'stat.blksize')
   setUint64(ints, 15, (stat && stat.blocks) ?? 0, 'stat.blocks')
-  setInt64(ints, 17, toDateMS(stat && stat.atime), 'stat.atime')
-  setInt64(ints, 19, toDateMS(stat && stat.mtime), 'stat.mtime')
-  setInt64(ints, 21, toDateMS(stat && stat.ctime), 'stat.ctime')
+  setTimespec(ints, 17, stat && stat.atime, 'stat.atime')
+  setTimespec(ints, 20, stat && stat.mtime, 'stat.mtime')
+  setTimespec(ints, 23, stat && stat.ctime, 'stat.ctime')
 
   return ints
 }
@@ -1141,6 +1521,9 @@ function normalizeTimeoutOption (timeout) {
 
   const normalized = {}
   for (const [name, value] of Object.entries(timeout)) {
+    if (name !== 'default' && !OpcodesAndDefaults.has(name)) {
+      throw new TypeError(`Unknown timeout operation ${JSON.stringify(name)}`)
+    }
     if (value === false) {
       normalized[name] = false
     } else {
@@ -1154,19 +1537,32 @@ function validateOptions (opts) {
   const booleanOptions = [
     'displayFolder', 'debug', 'force', 'mkdir', 'allowOther', 'allowRoot',
     'autoUnmount', 'defaultPermissions', 'blkdev', 'kernelCache', 'autoCache',
-    'noforget', 'nonEmpty'
+    'noforget', 'nonEmpty', 'nullPathOk', 'noPath'
   ]
-  const integerOptions = ['uid', 'gid', 'blksize', 'maxRead', 'fd', 'userId', 'umask', 'remember']
   const numberOptions = ['entryTimeout', 'attrTimeout', 'acAttrTimeout']
   const stringOptions = ['fsname', 'subtype', 'modules', 'name']
+
+  for (const name of Reflect.ownKeys(opts)) {
+    if (typeof name !== 'string' || !KNOWN_OPTIONS.has(name)) {
+      throw new TypeError(`Unknown FUSE option ${String(name)}`)
+    }
+  }
 
   for (const name of booleanOptions) {
     if (opts[name] !== undefined && typeof opts[name] !== 'boolean') {
       throw new TypeError(`${name} must be a boolean`)
     }
   }
-  for (const name of integerOptions) {
-    if (opts[name] !== undefined && opts[name] !== null) mountInteger(name, opts[name])
+  for (const name of ['uid', 'gid', 'userId', 'blksize', 'maxRead']) {
+    if (opts[name] !== undefined && opts[name] !== null) boundedInteger(name, opts[name], 0, 0xffffffff)
+  }
+  if (opts.fd !== undefined && opts.fd !== null) boundedInteger('fd', opts.fd, 0, MAX_INT32)
+  if (opts.umask !== undefined && opts.umask !== null) boundedInteger('umask', opts.umask, 0, 0o7777)
+  if (opts.remember !== undefined && opts.remember !== null) {
+    boundedInteger('remember', opts.remember, 0, MAX_INT32)
+  }
+  if (opts.maxConcurrency !== undefined && opts.maxConcurrency !== null) {
+    boundedInteger('maxConcurrency', opts.maxConcurrency, 1, MAX_MAX_CONCURRENCY)
   }
   for (const name of numberOptions) {
     if (opts[name] !== undefined && opts[name] !== null) mountNumber(name, opts[name])
@@ -1176,6 +1572,15 @@ function validateOptions (opts) {
   }
   if (opts.onError !== undefined && typeof opts.onError !== 'function') {
     throw new TypeError('onError must be a function')
+  }
+}
+
+function validateOperations (ops) {
+  for (const name of Reflect.ownKeys(ops)) {
+    if (typeof name !== 'string' || !KNOWN_OPERATIONS.has(name)) {
+      if (name === 'error') continue
+      throw new TypeError(`Unknown FUSE 2 operation ${String(name)}`)
+    }
   }
 }
 
@@ -1204,10 +1609,19 @@ function mountInteger (name, value) {
   return value
 }
 
+function boundedInteger (name, value, minimum, maximum) {
+  if (!Number.isSafeInteger(value)) throw new TypeError(`${name} must be a safe integer`)
+  if (value < minimum || value > maximum) {
+    throw new RangeError(`${name} must be between ${minimum} and ${maximum}`)
+  }
+  return value
+}
+
 function normalizeResult (result, operation) {
   if (result === null || result === undefined) return 0
   if (!Number.isInteger(result) || result < MIN_INT32 || result > MAX_INT32) return Fuse.EIO
   if (result > 0 && operation !== 'read' && operation !== 'write' &&
+      operation !== 'writeBuffer' &&
       operation !== 'getxattr' && operation !== 'listxattr') {
     return Fuse.EIO
   }
@@ -1273,18 +1687,43 @@ function getReaddirOffsetsArray (offsets, length) {
   return encoded
 }
 
+function encodeLock (lock) {
+  if (!lock || typeof lock !== 'object' || Array.isArray(lock)) {
+    throw new TypeError('lock result must be an object')
+  }
+  const fields = new Set(['type', 'whence', 'start', 'length', 'pid'])
+  for (const name of Reflect.ownKeys(lock)) {
+    if (typeof name !== 'string' || !fields.has(name)) {
+      throw new TypeError(`Unknown lock property ${String(name)}`)
+    }
+  }
+  const encoded = new Uint32Array(7)
+  encoded[0] = boundedInteger('lock.type', lock.type, 0, 0xffff)
+  encoded[1] = boundedInteger('lock.whence', lock.whence, 0, 0xffff)
+  setInt64(encoded, 2, lock.start, 'lock.start')
+  setInt64(encoded, 4, lock.length, 'lock.length')
+  const pid = lock.pid ?? 0
+  if (!Number.isInteger(pid) || pid < MIN_INT32 || pid > MAX_INT32) {
+    throw new RangeError('lock.pid must be a signed 32-bit integer')
+  }
+  encoded[6] = pid >>> 0
+  return encoded
+}
+
 function getInitConfigArray (connection, requested) {
   if (requested === null || requested === undefined) return EMPTY_INIT_CONFIG
   if (typeof requested !== 'object' || Array.isArray(requested)) {
     throw new TypeError('init configuration must be an object')
   }
 
-  const config = new Uint32Array(6)
+  const config = new Uint32Array(7)
   for (const name of Reflect.ownKeys(requested)) {
     if (typeof name !== 'string') throw new TypeError(`Unknown init configuration property ${String(name)}`)
     const field = INIT_CONFIG_FIELDS.get(name)
     if (!field) throw new TypeError(`Unknown init configuration property ${JSON.stringify(name)}`)
-    const value = toUint32(requested[name], `init configuration.${name}`)
+    const value = field.boolean
+      ? booleanToUint32(requested[name], `init configuration.${name}`)
+      : toUint32(requested[name], `init configuration.${name}`)
     if (value < field.minimum) {
       throw new RangeError(`init configuration.${name} must be at least ${field.minimum}`)
     }
@@ -1315,6 +1754,11 @@ function getInitConfigArray (connection, requested) {
     throw new RangeError('init configuration.congestionThreshold cannot exceed maxBackground')
   }
   return config
+}
+
+function booleanToUint32 (value, name) {
+  if (typeof value !== 'boolean') throw new TypeError(`${name} must be a boolean`)
+  return value ? 1 : 0
 }
 
 function toUint32 (value, name) {
@@ -1356,4 +1800,10 @@ function toInt64 (value, name) {
     throw new RangeError(`${name} is outside the int64 range`)
   }
   return num
+}
+
+function setNonNegativeInt64 (arr, idx, value, name) {
+  const num = toInt64(value, name)
+  if (num < 0n) throw new RangeError(`${name} must be non-negative`)
+  setInt64(arr, idx, num, name)
 }

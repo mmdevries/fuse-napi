@@ -149,6 +149,9 @@ Create a new `Fuse` object.
   force: false,        // Attempt to unmount before remounting.
   mkdir: false,        // Create the mountpoint before mounting.
   timeout: 15000,      // Operation and mount-start timeout in milliseconds.
+  maxConcurrency: 4,   // Fixed native request-worker count (1 through 64).
+  nullPathOk: false,   // Accept null paths for unlinked handle operations.
+  noPath: false,       // Avoid path reconstruction for handle operations.
   onError: (error, operation, args) => {
     // Report exceptions thrown by an operation implementation.
   }
@@ -163,19 +166,37 @@ Each operation callback is accepted only once. A timeout, synchronous
 exception, or rejected promise is translated to a FUSE error and cannot leave
 the native worker blocked. Return values, buffer lengths, directory entries,
 extended attributes, statistics, and mount options are validated before they
-cross the native boundary.
+cross the native boundary. Unknown option and operation names are rejected so
+configuration mistakes cannot silently change filesystem behavior.
+
+The native request loop uses exactly `maxConcurrency` workers instead of
+libfuse 2's dynamically growing multithreaded loop. This bounds native
+threads, outstanding JavaScript callbacks, and memory use under load. Mount
+startup runs outside the JavaScript event loop and remains subject to the
+configured `init` deadline.
 
 For a larger usage example, see CoCalc's
 [WebSocketFS FUSE integration](https://github.com/sagemathinc/websocketfs/tree/main/lib/fuse).
 
 ### FUSE API
 
-Most of the [FUSE api](http://fuse.sourceforge.net/doxygen/structfuse__operations.html) is supported. In general the callback for each op should be called with `cb(returnCode, [value])` where the return code is a number (`0` for OK and `< 0` for errors). See below for a list of POSIX error codes.
+The complete non-deprecated, portable FUSE 2.9 high-level callback surface is
+supported. Deprecated `getdir` and `utime` are represented by `readdir` and
+`utimens`. In general the callback for each op should be called with
+`cb(returnCode, [value])`, where the return code is a number (`0` for OK and
+`< 0` for errors). See below for a list of POSIX error codes.
 
 File handles, file positions, sizes, inode counters, and other 64-bit values
 are passed as a `number` while exactly representable and as a `bigint`
 otherwise. Implementations must preserve a `bigint` file handle and return it
 unchanged to their own storage layer.
+
+During an operation, `fuse.context()` returns a frozen snapshot containing
+`uid`, `gid`, `pid`, `umask`, and the portable `fuse_file_info` fields. The
+context is isolated across promises and other asynchronous work with
+`AsyncLocalStorage`; outside an operation it returns `null`. When
+`nullPathOk` or `noPath` is enabled, the affected handle-based callbacks must
+accept `null` as their path.
 
 TypeScript: see [index.d.ts](./index.d.ts).
 
@@ -191,7 +212,8 @@ snapshot of the portable FUSE 2 connection fields:
 `capable`, `want`, `maxBackground`, and `congestionThreshold`.
 
 The callback may return a conservative configuration containing `maxWrite`,
-`maxReadahead`, `maxBackground`, `congestionThreshold`, and/or `want`.
+`maxReadahead`, `maxBackground`, `congestionThreshold`, `want`, and/or
+`asyncRead`.
 Requested limits may not exceed the values supplied by the kernel, `want`
 must be a subset of `capable`, and the congestion threshold may not exceed
 the background-request limit. Omitting the configuration preserves all
@@ -427,6 +449,67 @@ handle or the file-info result object described under `open`.
 Called when the atime/mtime of a file is being changed. `atime` and `mtime`
 are signed integer milliseconds since the Unix epoch and can be `bigint`
 outside JavaScript's safe-integer range.
+
+#### `ops.utimensWithTimespec(path, atime, mtime, cb)`
+
+Mutually exclusive, lossless alternative to `utimens`. Both times are frozen
+`{ seconds, nanoseconds }` values. Nanoseconds are preserved exactly and may
+be `Fuse.UTIME_NOW` or `Fuse.UTIME_OMIT`; the native
+`flag_utime_omit_ok` bit is enabled only for this variant. Stat timestamps may
+also be returned in this timespec form.
+
+#### `ops.destroy(cb)`
+
+Called exactly once when an initialized filesystem exits through an orderly
+libfuse teardown. Teardown waits for this callback, subject to the configured
+operation deadline. JavaScript cannot be called once the Node-API environment
+itself is already shutting down.
+
+#### `ops.lock(path, fd, command, lock, cb)`
+
+Handles portable POSIX record locks. `lock` is a frozen object with `type`,
+`whence`, signed `start`, signed `length`, and `pid`. For `F_GETLK`, return an
+updated lock as the second callback argument.
+
+#### `ops.flock(path, fd, operation, cb)`
+
+Handles BSD `flock` operations for filesystems that need remote locking.
+Without this callback the kernel can still provide local locking.
+
+#### `ops.bmap(path, blockSize, index, cb)`
+
+Maps a file block to a device block. Return the mapped 64-bit index as the
+second callback argument. This is meaningful for block-device-backed mounts.
+
+#### `ops.ioctl(path, fd, command, argument, flags, data, cb)`
+
+Handles bounded, well-formed FUSE 2 ioctls. `argument` and file handles remain
+lossless, and `data` is request-owned. Return a same-length output Buffer.
+Unrestricted retry/iovec ioctls are rejected with `EOPNOTSUPP` because their
+borrowed-pointer protocol cannot be represented safely by this callback API.
+Payloads larger than 1 MiB are rejected before entering JavaScript.
+
+#### `ops.poll(path, fd, cb)`
+
+Returns the current readiness event mask. The native poll handle is always
+destroyed exactly once. This API intentionally provides snapshot readiness;
+it does not retain a native handle for later JavaScript notifications.
+
+#### `ops.writeBuffer(path, fd, buffer, length, position, cb)`
+
+Mutually exclusive alternative to `write` implementing FUSE `write_buf`.
+Generic memory/file-descriptor vectors are flattened into a request-owned
+Buffer before JavaScript is called. Return the validated byte count.
+
+#### `ops.readBuffer(path, fd, length, position, cb)`
+
+Mutually exclusive alternative to `read` implementing FUSE `read_buf`.
+Return `cb(0, buffer)` with at most `length` bytes; native storage is allocated
+with the ownership rules required by libfuse.
+
+#### `ops.fallocate(path, fd, mode, offset, length, cb)`
+
+Allocates a signed 64-bit byte range for an open file.
 
 #### `ops.unlink(path, cb)`
 

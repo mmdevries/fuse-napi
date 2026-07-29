@@ -38,6 +38,41 @@ tape('constructor and mount option inputs are validated', function (t) {
     /non-negative safe integer/,
     'negative timeouts are rejected'
   )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-unknown-operation', { getatrr () {} }),
+    /Unknown FUSE 2 operation/,
+    'misspelled operations are rejected'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-unknown-option', {}, { allowOthers: true }),
+    /Unknown FUSE option/,
+    'misspelled options are rejected'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-unknown-timeout', {}, { timeout: { rea: 10 } }),
+    /Unknown timeout operation/,
+    'misspelled timeout operations are rejected'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-worker-limit', {}, { maxConcurrency: 0 }),
+    /between 1 and 64/,
+    'zero native workers are rejected'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-worker-limit', {}, { maxConcurrency: 65 }),
+    /between 1 and 64/,
+    'excessive native workers are rejected'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-read-conflict', { read () {}, readBuffer () {} }),
+    /mutually exclusive/,
+    'read and readBuffer cannot compete for the same FUSE callback'
+  )
+  t.throws(
+    () => new Fuse('/tmp/fuse-napi-write-conflict', { write () {}, writeBuffer () {} }),
+    /mutually exclusive/,
+    'write and writeBuffer cannot compete for the same FUSE callback'
+  )
 
   for (const value of ['name,allow_other', 'name\\allow_other', 'name\nallow_other', 'name\0allow_other']) {
     t.throws(
@@ -58,6 +93,8 @@ tape('constructor and mount option inputs are validated', function (t) {
   t.equal(fuse.timeout.default, false, 'disabled default timeout is preserved')
   t.equal(fuse.timeout.read, 10, 'per-operation timeout is preserved')
   t.equal(fuse.timeout.init, 0, 'zero mount timeout is preserved')
+  t.ok(Object.isFrozen(fuse.timeout), 'normalized timeout configuration is immutable')
+  t.equal(fuse.maxConcurrency, 4, 'native concurrency has a conservative default')
   t.end()
 })
 
@@ -79,6 +116,58 @@ tape('unmount passes the mountpoint as a literal process argument', function (t)
     childProcess.execFile = originalExecFile
     delete require.cache[indexPath]
     t.error(err, 'literal argument unmount succeeds')
+    t.end()
+  })
+})
+
+tape('native mount startup is asynchronous, bounded, and cancellable', function (t) {
+  const originalStat = require('fs').stat
+  const originalMount = binding.fuse_native_mount
+  const originalCancel = binding.fuse_native_cancel_mount
+  const filesystem = require('fs')
+  let mountArguments
+  let cancellations = 0
+
+  filesystem.stat = function (name, cb) {
+    process.nextTick(cb, null, {
+      dev: 1,
+      isDirectory () { return true }
+    })
+  }
+  binding.fuse_native_mount = function (...args) {
+    mountArguments = args
+  }
+  binding.fuse_native_cancel_mount = function () {
+    cancellations++
+  }
+
+  const fuse = new Fuse('/tmp/fuse-napi-async-mount', {
+    utimensWithTimespec () {}
+  }, {
+    timeout: { default: false, init: 20 },
+    maxConcurrency: 3,
+    nullPathOk: true,
+    noPath: true
+  })
+
+  fuse._open(function (err) {
+    filesystem.stat = originalStat
+    binding.fuse_native_mount = originalMount
+    binding.fuse_native_cancel_mount = originalCancel
+
+    t.ok(err, 'startup deadline completes even while native mount work is pending')
+    t.equal(cancellations, 1, 'pending native mount receives one cancellation request')
+    t.equal(mountArguments[6], 3, 'configured worker bound reaches the native layer')
+    t.equal(mountArguments[7], 7, 'null-path and timespec flags reach the native layer')
+    t.equal(typeof mountArguments[8], 'function', 'unexpected loop exit callback is installed')
+    t.equal(typeof mountArguments[9], 'function', 'asynchronous mount completion callback is installed')
+    t.equal(fuse._nativeMountPending, true, 'state remains retained until native cancellation finishes')
+
+    const cancelled = new Error('cancelled')
+    cancelled.code = 'EFUSEMOUNTCANCELLED'
+    mountArguments[9](cancelled)
+    t.equal(fuse._nativeMountPending, false, 'late native completion releases pending ownership')
+    t.equal(fuse._thread, null, 'late native completion releases the native state buffer')
     t.end()
   })
 })
@@ -150,7 +239,7 @@ tape('operation failures, duplicate callbacks, and timeouts signal exactly once'
 
 tape('64-bit statistics, offsets, and file handles remain lossless', function (t) {
   const large = 0x20000000000001n
-  const beforeEpoch = -2208988800000
+  const beforeEpoch = -2208988800123
   const fuse = new Fuse('/tmp/fuse-napi-64-bit', {
     getattr (name, cb) {
       cb(0, {
@@ -158,7 +247,7 @@ tape('64-bit statistics, offsets, and file handles remain lossless', function (t
         size: large,
         ino: large + 1n,
         atime: beforeEpoch,
-        mtime: 0,
+        mtime: { seconds: large, nanoseconds: 123456789 },
         ctime: 1
       })
     },
@@ -175,7 +264,10 @@ tape('64-bit statistics, offsets, and file handles remain lossless', function (t
     t.equal(err, 0, 'large stat succeeds')
     t.equal(joinUint64(stat, 3), large, 'large file size is exact')
     t.equal(joinUint64(stat, 9), large + 1n, 'large inode is exact')
-    t.equal(joinInt64(stat, 17), BigInt(beforeEpoch), 'pre-epoch timestamp is exact')
+    t.equal(joinInt64(stat, 17), -2208988801n, 'pre-epoch timestamp seconds are normalized')
+    t.equal(stat[19], 877000000, 'negative millisecond timestamp retains its subsecond value')
+    t.equal(joinInt64(stat, 20), large, 'large timestamp seconds remain lossless')
+    t.equal(stat[22], 123456789, 'nanosecond precision remains lossless')
   }, '/test')
 
   fuse._op_open(function (err, fd) {
@@ -267,7 +359,8 @@ tape('enhanced open, create, readdir, and init contracts are lossless', function
         maxReadahead: 32768,
         maxBackground: 8,
         congestionThreshold: 4,
-        want: 0b0011
+        want: 0b0011,
+        asyncRead: false
       })
     },
     open (name, flags, cb) {
@@ -286,7 +379,7 @@ tape('enhanced open, create, readdir, and init contracts are lossless', function
 
   fuse._op_init(function (err, config) {
     t.equal(err, 0, 'validated init configuration succeeds')
-    t.deepEqual([...config], [31, 65536, 32768, 8, 4, 3], 'init settings are encoded exactly')
+    t.deepEqual([...config], [63, 65536, 32768, 8, 4, 3, 0], 'init settings are encoded exactly')
   }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12)
 
   fuse._op_open(function (err, fd, flags) {
@@ -386,6 +479,203 @@ tape('teardown cancels pending operations and coalesces callers', function (t) {
     t.equal(fuse._nativeMounted, false, 'mounted state is cleared')
     t.end()
   }
+})
+
+tape('request context is immutable and isolated across asynchronous handlers', function (t) {
+  const originalSignal = binding.fuse_native_signal_access
+  const observed = new Map()
+  const signalled = []
+  let fuse
+
+  binding.fuse_native_signal_access = function (nativeHandler, result) {
+    signalled.push([nativeHandler.id, result])
+    if (signalled.length !== 2) return
+    binding.fuse_native_signal_access = originalSignal
+
+    t.deepEqual(signalled.sort(), [['one', 0], ['two', 0]], 'both requests complete independently')
+    t.equal(observed.get('/one').uid, 501, 'first request retains its uid')
+    t.equal(observed.get('/two').uid, 502, 'second request retains its uid')
+    t.equal(observed.get('/one').fileInfo.fd, 0x20000000000001n, 'large file handle is lossless')
+    t.equal(observed.get('/one').fileInfo.lockOwner, 9, 'lock owner is exposed')
+    t.equal(observed.get('/one').fileInfo.directIO, true, 'file-info flags are decoded')
+    t.ok(Object.isFrozen(observed.get('/one')), 'request context is frozen')
+    t.ok(Object.isFrozen(observed.get('/one').fileInfo), 'file info is frozen')
+    t.end()
+  }
+
+  fuse = new Fuse('/tmp/fuse-napi-context', {
+    async access (name, mode, cb) {
+      await new Promise(resolve => setImmediate(resolve))
+      observed.set(name, fuse.context())
+      cb(0)
+    }
+  })
+
+  const first = new Uint32Array(11)
+  first.set([501, 20, 1234, 0o027, 1, 2, 2, 1, 0x00200000, 9, 0])
+  const second = new Uint32Array(11)
+  second.set([502, 21, 1235, 0o022, 0, 0, 0, 0, 0, 0, 0])
+  fuse._handlers[binding.op_access]({ id: 'one' }, binding.op_access, '/one', 4, first)
+  fuse._handlers[binding.op_access]({ id: 'two' }, binding.op_access, '/two', 4, second)
+  t.equal(fuse.context(), null, 'context is unavailable outside an operation')
+})
+
+tape('timespec input preserves nanoseconds and special utimens values', function (t) {
+  const calls = []
+  const fuse = new Fuse('/tmp/fuse-napi-timespec', {
+    utimensWithTimespec (name, atime, mtime, cb) {
+      calls.push([name, atime, mtime])
+      cb(0)
+    }
+  })
+
+  fuse._op_utimens(function (err) {
+    t.equal(err, 0, 'timespec utimens succeeds')
+  }, '/file', 0xffffffff, 0xffffffff, 999999999, 5, 0, Fuse.UTIME_OMIT)
+
+  const [, atime, mtime] = calls[0]
+  t.deepEqual(atime, { seconds: -1, nanoseconds: 999999999 }, 'signed time is exact')
+  t.deepEqual(mtime, { seconds: 5, nanoseconds: Fuse.UTIME_OMIT }, 'UTIME_OMIT is retained')
+  t.ok(Object.isFrozen(atime) && Object.isFrozen(mtime), 'timespec inputs are immutable')
+
+  const legacy = new Fuse('/tmp/fuse-napi-legacy-timespec', {
+    utimens (name, receivedAtime, receivedMtime, cb) {
+      t.fail('legacy callback must not receive an unrepresentable special value')
+    }
+  })
+  legacy._op_utimens(
+    err => t.equal(err, Fuse.EOPNOTSUPP, 'legacy utimens rejects special values predictably'),
+    '/file',
+    0,
+    0,
+    Fuse.UTIME_NOW,
+    0,
+    0,
+    0
+  )
+  t.end()
+})
+
+tape('remaining portable FUSE 2 operation contracts are validated and lossless', function (t) {
+  const calls = []
+  const input = Buffer.from([1, 2, 3, 4])
+  const output = Buffer.from([4, 3, 2, 1])
+  const fuse = new Fuse('/tmp/fuse-napi-portable-operations', {
+    destroy (cb) {
+      calls.push(['destroy'])
+      cb(0)
+    },
+    lock (name, fd, command, lock, cb) {
+      calls.push(['lock', name, fd, command, lock.start])
+      cb(0, { ...lock, pid: 4321 })
+    },
+    bmap (name, blockSize, index, cb) {
+      calls.push(['bmap', blockSize, index])
+      cb(0, 0x20000000000001n)
+    },
+    ioctl (name, fd, command, argument, flags, data, cb) {
+      calls.push(['ioctl', argument, flags, data])
+      cb(0, output)
+    },
+    poll (name, fd, cb) {
+      calls.push(['poll', fd])
+      cb(0, 0x41)
+    },
+    writeBuffer (name, fd, buffer, length, position, cb) {
+      calls.push(['writeBuffer', buffer, length, position])
+      cb(length)
+    },
+    readBuffer (name, fd, length, position, cb) {
+      calls.push(['readBuffer', length, position])
+      cb(0, Buffer.from('ok'))
+    },
+    flock (name, fd, operation, cb) {
+      calls.push(['flock', operation])
+      cb(0)
+    },
+    fallocate (name, fd, mode, offset, length, cb) {
+      calls.push(['fallocate', mode, offset, length])
+      cb(0)
+    }
+  })
+
+  fuse._op_destroy(err => t.equal(err, 0, 'destroy completes'))
+  fuse._op_lock(function (err, lock) {
+    t.equal(err, 0, 'POSIX lock completes')
+    t.equal(lock[6], 4321, 'F_GETLK result is returned')
+  }, '/file', 7, 5, 1, 0, 0xffffffff, 0xffffffff, 0, 0, 12)
+  fuse._op_bmap(function (err, index) {
+    t.equal(err, 0, 'bmap completes')
+    t.equal(index, 0x20000000000001n, 'bmap index remains lossless')
+  }, '/file', 4096, 2)
+  fuse._op_ioctl(function (err, data) {
+    t.equal(err, 0, 'ioctl completes')
+    t.equal(data, output, 'ioctl returns the validated output buffer')
+  }, '/file', 7, 0x1234, 0x20000000000001n, 1, input)
+  fuse._op_poll((err, events) => t.deepEqual([err, events], [0, 0x41], 'poll events are returned'),
+    '/file', 7)
+  fuse._op_write_buf(err => t.equal(err, input.length, 'write_buf byte count is returned'),
+    '/file', 7, input, input.length, 0xffffffff, 0xffffffff)
+  fuse._op_read_buf(function (err, buffer) {
+    t.equal(err, 0, 'read_buf completes')
+    t.equal(buffer.toString(), 'ok', 'read_buf returns its owned Buffer')
+  }, '/file', 7, 4, 0, 0)
+  fuse._op_flock(err => t.equal(err, 0, 'flock completes'), '/file', 7, 2)
+  fuse._op_fallocate(err => t.equal(err, 0, 'fallocate completes'),
+    '/file', 7, 0, 0, 0, 0, 1)
+
+  t.equal(calls.find(call => call[0] === 'lock')[4], -1, 'lock start is signed')
+  t.equal(calls.find(call => call[0] === 'ioctl')[1], 0x20000000000001n, 'ioctl argument is lossless')
+  t.equal(calls.find(call => call[0] === 'writeBuffer')[3], -1, 'write_buf offset is signed')
+  t.end()
+})
+
+tape('teardown distinguishes helper errors from native ownership failures', function (t) {
+  const originalUnmount = Fuse.unmount
+  const originalNativeUnmount = binding.fuse_native_unmount
+  const reports = []
+  const helperError = new Error('already detached')
+  const fuse = new Fuse('/tmp/fuse-napi-teardown-errors', {}, {
+    onError (err, operation) {
+      reports.push([err, operation])
+    }
+  })
+
+  Fuse.unmount = (mnt, cb) => process.nextTick(cb, helperError)
+  binding.fuse_native_unmount = (thread, cb) => process.nextTick(cb, null)
+  fuse._nativeMounted = true
+  fuse._thread = Buffer.alloc(8)
+  fuse._teardown(null, function (err) {
+    t.error(err, 'helper failure is diagnostic after native cleanup succeeds')
+    t.equal(fuse._nativeMounted, false, 'successful native cleanup clears mounted state')
+    t.equal(fuse._thread, null, 'successful native cleanup releases state')
+    t.deepEqual(reports, [[helperError, 'unmount']], 'helper error is reported exactly once')
+
+    const cleanupError = new Error('attribute cleanup failed')
+    cleanupError.cleanupComplete = true
+    Fuse.unmount = (mnt, cb) => process.nextTick(cb, null)
+    binding.fuse_native_unmount = (thread, cb) => process.nextTick(cb, cleanupError)
+    fuse._nativeMounted = true
+    fuse._thread = Buffer.alloc(8)
+    fuse._teardown(null, function (err) {
+      t.equal(err, cleanupError, 'completed native cleanup can still report diagnostics')
+      t.equal(fuse._nativeMounted, false, 'completed cleanup clears mounted state despite diagnostics')
+      t.equal(fuse._thread, null, 'completed cleanup releases native state')
+
+      const ownershipError = new Error('thread still owned')
+      binding.fuse_native_unmount = (thread, cb) => process.nextTick(cb, ownershipError)
+      fuse._nativeMounted = true
+      fuse._thread = Buffer.alloc(8)
+      fuse._teardown(null, function (err) {
+        Fuse.unmount = originalUnmount
+        binding.fuse_native_unmount = originalNativeUnmount
+        t.equal(err, ownershipError, 'incomplete native cleanup is returned')
+        t.equal(fuse._nativeMounted, true, 'ownership is retained for a safe retry')
+        t.ok(fuse._thread, 'native state remains retained for a safe retry')
+        t.end()
+      })
+    })
+  })
 })
 
 function joinUint64 (array, index) {

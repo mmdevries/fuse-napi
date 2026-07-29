@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. Releases follow
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- The remaining non-deprecated portable FUSE 2.9 callbacks: `destroy`,
+  `lock`, `flock`, `bmap`, bounded `ioctl`, snapshot `poll`, `write_buf`,
+  `read_buf`, and `fallocate`.
+- Lossless timespec input/output, including explicit `UTIME_NOW` and
+  `UTIME_OMIT`, and request-local `fuse.context()` snapshots.
+- A configurable fixed worker pool and real-mount production-hardening tests
+  for concurrency limits, buffer-vector operations, request context, and
+  destroy ordering.
+
+### Changed
+
+- Mount startup is asynchronous and cancellable, operation and option names
+  are strictly validated, and unimplemented optional callbacks consistently
+  return `ENOSYS`.
+- Native teardown, cancellation, request ownership, callback deadlines, and
+  64-bit/timestamp validation have been hardened for deterministic failure
+  behavior.
+
 ## 1.0.0 - 2026-07-28
 
 ### Added

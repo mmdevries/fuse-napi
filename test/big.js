@@ -17,7 +17,6 @@ tape('read and write big file', function (t) {
   const writes = [0, 4 * 1024 * 1024 * 1024, 6 * 1024 * 1024 * 1024]
 
   var ops = {
-    force: true,
     readdir (path, cb) {
       if (path === '/') return process.nextTick(cb, null, ['test'])
       return process.nextTick(cb, Fuse.ENOENT)

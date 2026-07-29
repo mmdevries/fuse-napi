@@ -45,10 +45,8 @@ tape('read', function (t) {
   })
 })
 
-// Skipped because this test takes 2 minutes to run.
-tape.skip('read timeout does not force unmount', function (t) {
+tape('read timeout does not force unmount', function (t) {
   var ops = {
-    force: true,
     readdir: function (path, cb) {
       if (path === '/') return process.nextTick(cb, null, ['test'])
       return process.nextTick(cb, Fuse.ENOENT)
@@ -73,16 +71,18 @@ tape.skip('read timeout does not force unmount', function (t) {
         buf.write(str)
         return process.nextTick(cb, str.length)
       } else if (path === '/timeout') {
-        console.log('read is gonna time out')
-        // Just let this one timeout
-        setTimeout(cb, 20 * 1000, -2)
+        // Deliberately never complete this request. The binding must time it out.
         return
       }
       return cb(-2)
     }
   }
 
-  const fuse = new Fuse(mnt, ops, { debug: false })
+  const fuse = new Fuse(mnt, ops, {
+    debug: false,
+    force: true,
+    timeout: { default: 5000, read: 25 }
+  })
   fuse.mount(function (err) {
     t.error(err, 'no error')
 
@@ -90,27 +90,16 @@ tape.skip('read timeout does not force unmount', function (t) {
       t.error(err, 'no error')
       t.same(buf, Buffer.from('hello world'), 'read file')
 
-      // Start the read that will time out, wait a bit, then ensure that the second read works.
-      console.time('timeout')
       fs.readFile(path.join(mnt, 'timeout'), function (err, buf) {
-        console.timeEnd('timeout')
-        console.log('the read timed out')
-        t.true(err)
-      })
-
-      // The default FUSE timeout is 2 minutes, so wait another second after the timeout.
-      setTimeout(function () {
-        console.log('reading from test')
+        t.ok(err, 'stalled read returns an error after its short deadline')
         fs.readFile(path.join(mnt, 'test'), function (err, buf) {
-          t.error(err, 'no error')
-          t.same(buf, Buffer.from('hello world'), 'read file')
+          t.error(err, 'filesystem remains mounted after a timed-out request')
+          t.same(buf, Buffer.from('hello world'), 'subsequent reads remain functional')
           unmount(fuse, function () {
             t.end()
           })
         })
-      }, 1000 * 121)
+      })
     })
   })
 })
-
-

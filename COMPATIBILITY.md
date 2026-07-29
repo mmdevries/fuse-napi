@@ -22,7 +22,7 @@ The native layer exposes the FUSE 2.9 high-level API.
 | `readdir(path, cb)` / `readdirPaged(path, fd, offset, cb)` | Yes | Yes | Legacy mode returns one array with zero filler offsets. The mutually exclusive paged variant forwards the directory handle and signed 64-bit offset and requires one non-zero resume offset per entry. |
 | `truncate(path, size, cb)` | Yes | Yes | Signed 64-bit transport; values outside the safe-number range are delivered as `bigint`. |
 | `ftruncate(path, fd, size, cb)` | Yes | Yes | Signed 64-bit transport; values outside the safe-number range are delivered as `bigint`. |
-| `utimens(path, atime, mtime, cb)` | Yes | Yes | Signed millisecond transport, including pre-epoch timestamps; distinct atime and mtime forwarding is regression-tested. |
+| `utimens(path, atime, mtime, cb)` / `utimensWithTimespec(path, atime, mtime, cb)` | Yes | Yes | The legacy variant transports signed milliseconds. The mutually exclusive enhanced variant preserves seconds and nanoseconds exactly and safely enables `UTIME_NOW`/`UTIME_OMIT`. |
 | `readlink(path, cb)` | Yes | Yes | Shared implementation; oversized targets are safely truncated and NUL-terminated to the caller-provided buffer. |
 | `chown(path, uid, gid, cb)` | Yes | Yes | Shared implementation; uid/gid behavior is covered on macOS. |
 | `chmod(path, mode, cb)` | Yes | Yes | Shared implementation; permission changes are covered on macOS. |
@@ -44,21 +44,25 @@ The native layer exposes the FUSE 2.9 high-level API.
 | `symlink(src, dest, cb)` | Yes | Yes | Shared implementation. |
 | `mkdir(path, mode, cb)` | Yes | Yes | Shared implementation. |
 | `rmdir(path, cb)` | Yes | Yes | Shared implementation. |
+| `destroy(cb)` | Yes | Yes | Called once after an orderly exit of an initialized filesystem. Native cleanup waits for completion before releasing the environment and libfuse resources. |
+| `lock(path, fd, command, lock, cb)` | Yes | Yes | Portable POSIX record-lock fields are transported losslessly; `F_GETLK` may return an updated lock. |
+| `flock(path, fd, operation, cb)` | Yes | Yes | Shared BSD whole-file locking implementation. |
+| `bmap(path, blockSize, index, cb)` | Yes | Yes | Lossless block-index transport for block-device-backed filesystems. |
+| `ioctl(path, fd, command, argument, flags, data, cb)` | Yes | Yes | Bounded request-owned payloads up to 1 MiB. Unsafe unrestricted retry/iovec requests return `EOPNOTSUPP`. |
+| `poll(path, fd, cb)` | Yes | Yes | Returns snapshot readiness and destroys the native poll handle once; delayed JavaScript notification handles are deliberately not retained. |
+| `writeBuffer(path, fd, buffer, length, position, cb)` | Yes | Yes | Implements `write_buf`; generic vectors are flattened into request-owned bytes before JavaScript runs. Mutually exclusive with `write`. |
+| `readBuffer(path, fd, length, position, cb)` | Yes | Yes | Implements `read_buf` with libfuse-compatible native ownership. Mutually exclusive with `read`. |
+| `fallocate(path, fd, mode, offset, length, cb)` | Yes | Yes | Shared implementation with signed, lossless 64-bit range transport. |
 
-### Standard FUSE 2.9 callbacks not exposed
+### Deprecated FUSE 2.9 callbacks
 
-These callbacks are present in `struct fuse_operations` but absent from the
-existing JavaScript API:
+Every non-deprecated portable callback in the FUSE 2.9 high-level API is
+exposed. The two superseded callbacks are intentionally represented by their
+modern equivalents:
 
-| Callback | Portability | Initial-release decision |
+| Callback | Status | Decision |
 | --- | --- | --- |
 | `getdir`, `utime` | Deprecated | Do not add; use `readdir` and `utimens`. |
-| `destroy` | Linux and macOS | Not exposed to JavaScript; native unmount nevertheless joins the FUSE thread and releases all refs, semaphores, mutexes, async handles, channels, and sessions. |
-| `lock`, `flock` | Linux and macOS | Defer; local kernel locking remains available. |
-| `bmap` | Linux and macOS | Defer; block-device-specific. |
-| `ioctl`, `poll` | Linux and macOS | Defer; needs a deliberate JS buffer/event API. |
-| `write_buf`, `read_buf` | Linux and macOS | Defer; current Buffer bridge uses `read`/`write`. |
-| `fallocate` | Linux and macOS headers | Defer; semantics differ and sparse-file coverage comes first. |
 
 ### macFUSE-only callbacks not exposed
 
@@ -113,6 +117,9 @@ platform mount helper decides whether it is accepted.
 | `timeout` | JavaScript callback timeout | Yes | Yes | Bounds callbacks and mount startup; per-operation `false` and zero values are preserved. |
 | `name` | Source for `volname` | No-op | Yes | Used only when `displayFolder` is enabled. |
 | `onError` | JavaScript exception reporter | Yes | Yes | Receives operation exceptions and rejected promises before the request is completed with `EIO`. |
+| `maxConcurrency` | Fixed native request-worker count | Yes | Yes | Integer from 1 through 64; defaults to 4 and bounds threads, outstanding callbacks, and request memory. |
+| `nullPathOk` | `flag_nullpath_ok` | Yes | Yes | Allows `null` paths for the FUSE callbacks for which the FUSE 2 contract permits it. |
+| `noPath` | `flag_nopath` | Yes | Yes | Avoids path reconstruction for supported handle-based callbacks; those callbacks must accept a `null` path. |
 
 String-valued mount options reject NUL, comma, backslash, and newline
 characters instead of allowing one JavaScript value to inject additional

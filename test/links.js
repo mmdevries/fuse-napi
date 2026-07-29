@@ -12,7 +12,6 @@ const mnt = createMountpoint()
 tape('readlink', function (t) {
   const longTarget = 'target/'.repeat(10000)
   var ops = {
-    force: true,
     readdir: function (path, cb) {
       if (path === '/') return process.nextTick(cb, null, ['hello', 'link', 'long-link'])
       return process.nextTick(cb, Fuse.ENOENT)

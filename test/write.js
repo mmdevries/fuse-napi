@@ -15,7 +15,6 @@ tape('write', function (t) {
   var size = 0
 
   var ops = {
-    force: true,
     readdir: function (path, cb) {
       if (path === '/') return process.nextTick(cb, null, created ? ['hello'] : [], [])
       return process.nextTick(cb, Fuse.ENOENT)

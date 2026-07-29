@@ -3,6 +3,41 @@ declare namespace Fuse {
   export type Int64 = number | bigint;
   export type Uint64 = number | bigint;
   export type FileHandle = Uint64;
+  /** Can be null only when nullPathOk/noPath was enabled for handle-based operations. */
+  export type HandlePath = string | null;
+
+  export interface Timespec {
+    readonly seconds: Int64;
+    readonly nanoseconds: number;
+  }
+
+  export interface FileInfo {
+    readonly flags: number;
+    readonly writepage: boolean;
+    readonly directIO: boolean;
+    readonly keepCache: boolean;
+    readonly flush: boolean;
+    readonly nonseekable: boolean;
+    readonly flockRelease: boolean;
+    readonly fd: FileHandle;
+    readonly lockOwner: Uint64;
+  }
+
+  export interface RequestContext {
+    readonly uid: number;
+    readonly gid: number;
+    readonly pid: number;
+    readonly umask: number;
+    readonly fileInfo: Readonly<FileInfo> | null;
+  }
+
+  export interface Lock {
+    readonly type: number;
+    readonly whence: number;
+    readonly start: Int64;
+    readonly length: Int64;
+    readonly pid: number;
+  }
 
   export interface FileInfoResult {
     fd?: FileHandle;
@@ -29,6 +64,7 @@ declare namespace Fuse {
     maxBackground?: number;
     congestionThreshold?: number;
     want?: number;
+    asyncRead?: boolean;
   }
 
   // Stats object produced by fuse-native index.js function getStatArray
@@ -43,9 +79,9 @@ declare namespace Fuse {
     rdev?: Uint64;
     blksize?: Uint64;
     blocks?: Uint64;
-    atime?: Date | Int64;
-    mtime?: Date | Int64;
-    ctime?: Date | Int64;
+    atime?: Date | Int64 | Timespec;
+    mtime?: Date | Int64 | Timespec;
+    ctime?: Date | Int64 | Timespec;
   }
 
   export interface Statfs {
@@ -66,7 +102,7 @@ declare namespace Fuse {
     access?: (path: string, mode: number, cb: (err: Result) => void) => void;
     statfs?: (path: string, cb: (err: Result, stats?: Statfs) => void) => void;
     fgetattr?: (
-        path: string,
+        path: HandlePath,
         fd: FileHandle,
         cb: (err: Result, stat?: Stats) => void
     ) => void;
@@ -74,12 +110,11 @@ declare namespace Fuse {
         path: string,
         cb: (err: Result, stat?: Stats) => void
     ) => void;
-    flush?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
-    fsync?: (path: string, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
-    fsyncdir?: (path: string, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
+    flush?: (path: HandlePath, fd: FileHandle, cb: (err: Result) => void) => void;
+    fsync?: (path: HandlePath, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
+    fsyncdir?: (path: HandlePath, dataSync: boolean, fd: FileHandle, cb: (err: Result) => void) => void;
     truncate?: (path: string, size: Int64, cb: (err: Result) => void) => void;
-    ftruncate?: (path: string, fd: FileHandle, size: Int64, cb: (err: Result) => void) => void;
-    utimens?: (path: string, atime: Int64, mtime: Int64, cb: (err: Result) => void) => void;
+    ftruncate?: (path: HandlePath, fd: FileHandle, size: Int64, cb: (err: Result) => void) => void;
     readlink?: (path: string, cb: (err: Result, linkName?: string) => void) => void;
     chown?: (path: string, uid: number, gid: number, cb: (err: Result) => void) => void;
     chmod?: (path: string, mode: number, cb: (err: Result) => void) => void;
@@ -110,34 +145,60 @@ declare namespace Fuse {
         flags: number,
         cb: (err: Result, result?: FileHandle | FileInfoResult) => void
     ) => void;
-    read?: (
-        path: string,
-        fd: FileHandle,
-        buffer: Buffer,
-        length: number,
-        position: Int64,
-        cb: (result: number) => void
-    ) => void;
-    write?: (
-        path: string,
-        fd: FileHandle,
-        buffer: Buffer,
-        length: number,
-        position: Int64,
-        cb: (result: number) => void
-    ) => void;
     // For every open() call there will be exactly one release() call with the same flags and
     // file handle. It is possible to have a file opened more than once, in which case only the
     // last release will mean, that no more reads/writes will happen on the file. The return
     // value of release is ignored.
-    release?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
-    releasedir?: (path: string, fd: FileHandle, cb: (err: Result) => void) => void;
+    release?: (path: HandlePath, fd: FileHandle, cb: (err: Result) => void) => void;
+    releasedir?: (path: HandlePath, fd: FileHandle, cb: (err: Result) => void) => void;
     unlink?: (path: string, cb: (err: Result) => void) => void;
     rename?: (src: string, dest: string, cb: (err: Result) => void) => void;
     link?: (src: string, dest: string, cb: (err: Result) => void) => void;
     symlink?: (src: string, dest: string, cb: (err: Result) => void) => void;
     mkdir?: (path: string, mode: number, cb: (err: Result) => void) => void;
     rmdir?: (path: string, cb: (err: Result) => void) => void;
+    destroy?: (cb: (err: Result) => void) => void;
+    lock?: (
+        path: HandlePath,
+        fd: FileHandle,
+        command: number,
+        lock: Readonly<Lock>,
+        cb: (err: Result, lock?: Lock) => void
+    ) => void;
+    bmap?: (
+        path: string,
+        blockSize: Uint64,
+        index: Uint64,
+        cb: (err: Result, index?: Uint64) => void
+    ) => void;
+    ioctl?: (
+        path: HandlePath,
+        fd: FileHandle,
+        command: number,
+        argument: Uint64,
+        flags: number,
+        data: Buffer,
+        cb: (err: Result, output?: Buffer) => void
+    ) => void;
+    poll?: (
+        path: HandlePath,
+        fd: FileHandle,
+        cb: (err: Result, events?: number) => void
+    ) => void;
+    flock?: (
+        path: HandlePath,
+        fd: FileHandle,
+        operation: number,
+        cb: (err: Result) => void
+    ) => void;
+    fallocate?: (
+        path: HandlePath,
+        fd: FileHandle,
+        mode: number,
+        offset: Int64,
+        length: Int64,
+        cb: (err: Result) => void
+    ) => void;
   }
 
   export type OPERATIONS = CommonOperations & (
@@ -154,13 +215,13 @@ declare namespace Fuse {
       }
   ) & (
     | {
-        readdir?: (path: string, cb: (err: Result, names?: string[], stats?: Stats[]) => void) => void;
+        readdir?: (path: HandlePath, cb: (err: Result, names?: string[], stats?: Stats[]) => void) => void;
         readdirPaged?: never;
       }
     | {
         readdir?: never;
         readdirPaged?: (
-            path: string,
+            path: HandlePath,
             fd: FileHandle,
             offset: Int64,
             cb: (err: Result, names?: string[], stats?: Stats[], nextOffsets?: Int64[]) => void
@@ -184,13 +245,85 @@ declare namespace Fuse {
             cb: (err: Result, result?: FileHandle | FileInfoResult) => void
         ) => void;
       }
+  ) & (
+    | {
+        utimens?: (
+            path: string,
+            atime: Int64,
+            mtime: Int64,
+            cb: (err: Result) => void
+        ) => void;
+        utimensWithTimespec?: never;
+      }
+    | {
+        utimens?: never;
+        utimensWithTimespec?: (
+            path: string,
+            atime: Readonly<Timespec>,
+            mtime: Readonly<Timespec>,
+            cb: (err: Result) => void
+        ) => void;
+      }
+  ) & (
+    | {
+        read?: (
+            path: HandlePath,
+            fd: FileHandle,
+            buffer: Buffer,
+            length: number,
+            position: Int64,
+            cb: (result: number) => void
+        ) => void;
+        readBuffer?: never;
+      }
+    | {
+        read?: never;
+        readBuffer?: (
+            path: HandlePath,
+            fd: FileHandle,
+            length: number,
+            position: Int64,
+            cb: (err: Result, buffer?: Buffer) => void
+        ) => void;
+      }
+  ) & (
+    | {
+        write?: (
+            path: HandlePath,
+            fd: FileHandle,
+            buffer: Buffer,
+            length: number,
+            position: Int64,
+            cb: (result: number) => void
+        ) => void;
+        writeBuffer?: never;
+      }
+    | {
+        write?: never;
+        writeBuffer?: (
+            path: HandlePath,
+            fd: FileHandle,
+            buffer: Buffer,
+            length: number,
+            position: Int64,
+            cb: (result: number) => void
+        ) => void;
+      }
   );
 
-  export interface Timeouts {
+  export type OperationName =
+    | 'init' | 'access' | 'statfs' | 'fgetattr' | 'getattr' | 'flush'
+    | 'fsync' | 'fsyncdir' | 'readdir' | 'truncate' | 'ftruncate'
+    | 'utimens' | 'readlink' | 'chown' | 'chmod' | 'mknod' | 'setxattr'
+    | 'getxattr' | 'listxattr' | 'removexattr' | 'open' | 'opendir'
+    | 'read' | 'write' | 'release' | 'releasedir' | 'create' | 'unlink'
+    | 'rename' | 'link' | 'symlink' | 'mkdir' | 'rmdir' | 'destroy'
+    | 'lock' | 'bmap' | 'ioctl' | 'poll' | 'writeBuffer' | 'readBuffer'
+    | 'flock' | 'fallocate';
+
+  export type Timeouts = {
     default?: number | false;
-    init?: number | false;
-    [operation: string]: number | false | undefined;
-  }
+  } & Partial<Record<OperationName, number | false>>;
 
   // See https://github.com/refinio/fuse-native
   export interface OPTIONS {
@@ -224,6 +357,12 @@ declare namespace Fuse {
     modules?: string;
     name?: string;
     onError?: (error: unknown, operation: string, args: readonly unknown[]) => void;
+    /** Maximum number of simultaneous native FUSE requests. Range: 1..64. */
+    maxConcurrency?: number;
+    /** Permit null paths for supported handle-based operations after unlink. */
+    nullPathOk?: boolean;
+    /** Avoid path reconstruction for supported handle-based operations. */
+    noPath?: boolean;
   }
 }
 
@@ -359,14 +498,18 @@ declare class Fuse {
   static ENOMEDIUM: number;
   static EMEDIUMTYPE: number;
   static ECANCELED: number;
+  static UTIME_NOW: number;
+  static UTIME_OMIT: number;
 
-  public opts: Fuse.OPTIONS;
-  public mnt: string;
-  public ops: Fuse.OPERATIONS;
-  public timeout: number | Fuse.Timeouts;
+  public readonly opts: Readonly<Fuse.OPTIONS>;
+  public readonly mnt: string;
+  public readonly ops: Readonly<Fuse.OPERATIONS>;
+  public readonly timeout: number | false | Readonly<Fuse.Timeouts>;
+  public readonly maxConcurrency: number;
 
   public mount: (cb: (err?: null | Error) => any) => void;
   public unmount: (cb: (err: null | Error) => any) => void;
+  public context: () => Readonly<Fuse.RequestContext> | null;
   public errno: (code?: string) => number;
 
   // From "nanoresource"

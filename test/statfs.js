@@ -10,7 +10,6 @@ const mnt = createMountpoint()
 
 tape('statfs', function (t) {
   const ops = {
-    force: true,
     statfs: function (path, cb) {
       return cb(0, {
         bsize: 1000000,
