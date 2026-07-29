@@ -32,6 +32,10 @@ All notable changes to this project are documented here. Releases follow
 - Worker thread identifiers are retired under the cleanup mutex before their
   threads are joined, preventing concurrent teardown from cancelling a stale
   `pthread_t`.
+- Linux instance teardown now has one native owner for the complete FUSE 2
+  unmount-and-destroy lifecycle; macOS retains its required force-detach before
+  joining macFUSE request threads. Neither path accesses a channel after
+  `fuse_unmount()` has destroyed it.
 
 ## 1.0.0 - 2026-07-28
 

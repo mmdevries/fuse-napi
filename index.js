@@ -434,7 +434,11 @@ class Fuse extends Nanoresource {
 
     const command = IS_OSX ? 'diskutil' : 'fusermount'
     const args = IS_OSX ? ['unmount', 'force', mnt] : ['-uz', mnt]
-    execFile(command, args, { shell: false, timeout: DEFAULT_TIMEOUT }, err => {
+    execFile(command, args, {
+      shell: false,
+      timeout: DEFAULT_TIMEOUT,
+      killSignal: 'SIGKILL'
+    }, err => {
       if (err) return cb(err)
       return cb(null)
     })
@@ -689,10 +693,15 @@ class Fuse extends Nanoresource {
     }
     cancelPending()
 
-    Fuse.unmount(this.mnt, unmountError => {
-      if (unmountError) unmountError.unmountFailure = true
+    /*
+     * The native teardown owns the complete FUSE 2 lifecycle: stop and join
+     * the request loop, call fuse_unmount() once, then call fuse_destroy().
+     * Linux must not run a second fusermount helper before that lifecycle.
+     * macFUSE, however, requires a force-detach to wake its blocking receive
+     * before the native request threads can be joined.
+     */
+    const beginNativeCleanup = (unmountError) => {
       cancelPending()
-
       try {
         binding.fuse_native_unmount(this._thread, nativeError => {
           finish(nativeError || null, unmountError || null)
@@ -700,6 +709,12 @@ class Fuse extends Nanoresource {
       } catch (nativeError) {
         finish(nativeError, unmountError || null)
       }
+    }
+
+    if (!IS_OSX) return beginNativeCleanup(null)
+    Fuse.unmount(this.mnt, unmountError => {
+      if (unmountError) unmountError.unmountFailure = true
+      beginNativeCleanup(unmountError || null)
     })
   }
 

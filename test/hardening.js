@@ -107,6 +107,8 @@ tape('unmount passes the mountpoint as a literal process argument', function (t)
     t.ok(command === 'diskutil' || command === 'fusermount', 'known unmount executable is selected')
     t.equal(args[args.length - 1], dangerousPath, 'mountpoint remains one literal argument')
     t.equal(options.shell, false, 'no shell is involved')
+    t.equal(options.timeout, 15000, 'standalone unmount has a finite deadline')
+    t.equal(options.killSignal, 'SIGKILL', 'a timed-out helper cannot ignore termination')
     process.nextTick(cb, null)
   }
 
@@ -446,10 +448,14 @@ tape('teardown cancels pending operations and coalesces callers', function (t) {
   const originalNativeUnmount = binding.fuse_native_unmount
   const fuse = new Fuse('/tmp/fuse-napi-teardown')
   let cancellations = 0
+  let helperCalls = 0
   let nativeCalls = 0
   const results = []
 
-  Fuse.unmount = (mnt, cb) => process.nextTick(cb, null)
+  Fuse.unmount = (mnt, cb) => {
+    helperCalls++
+    process.nextTick(cb, null)
+  }
   binding.fuse_native_unmount = (thread, cb) => {
     nativeCalls++
     process.nextTick(cb, null)
@@ -475,6 +481,11 @@ tape('teardown cancels pending operations and coalesces callers', function (t) {
     t.deepEqual(results, [null, null], 'all teardown callers complete')
     t.equal(cancellations, 1, 'pending operation is cancelled once')
     t.equal(nativeCalls, 1, 'native cleanup runs once')
+    t.equal(
+      helperCalls,
+      process.platform === 'darwin' ? 1 : 0,
+      'only macOS uses its required force-detach helper'
+    )
     t.equal(fuse._thread, null, 'native state reference is released')
     t.equal(fuse._nativeMounted, false, 'mounted state is cleared')
     t.end()
@@ -630,30 +641,40 @@ tape('remaining portable FUSE 2 operation contracts are validated and lossless',
   t.end()
 })
 
-tape('teardown distinguishes helper errors from native ownership failures', function (t) {
+tape('teardown preserves platform diagnostics and native ownership failures', function (t) {
   const originalUnmount = Fuse.unmount
   const originalNativeUnmount = binding.fuse_native_unmount
   const reports = []
-  const helperError = new Error('already detached')
+  const helperError = new Error('standalone helper failed')
+  let helperResult = helperError
+  let helperCalls = 0
   const fuse = new Fuse('/tmp/fuse-napi-teardown-errors', {}, {
     onError (err, operation) {
       reports.push([err, operation])
     }
   })
 
-  Fuse.unmount = (mnt, cb) => process.nextTick(cb, helperError)
+  Fuse.unmount = (mnt, cb) => {
+    helperCalls++
+    process.nextTick(cb, helperResult)
+  }
   binding.fuse_native_unmount = (thread, cb) => process.nextTick(cb, null)
   fuse._nativeMounted = true
   fuse._thread = Buffer.alloc(8)
   fuse._teardown(null, function (err) {
-    t.error(err, 'helper failure is diagnostic after native cleanup succeeds')
+    t.error(err, 'native cleanup succeeds independently')
     t.equal(fuse._nativeMounted, false, 'successful native cleanup clears mounted state')
     t.equal(fuse._thread, null, 'successful native cleanup releases state')
-    t.deepEqual(reports, [[helperError, 'unmount']], 'helper error is reported exactly once')
+    t.equal(helperCalls, process.platform === 'darwin' ? 1 : 0, 'platform helper use is explicit')
+    t.deepEqual(
+      reports,
+      process.platform === 'darwin' ? [[helperError, 'unmount']] : [],
+      'platform helper diagnostics are reported only when the helper is required'
+    )
 
     const cleanupError = new Error('attribute cleanup failed')
     cleanupError.cleanupComplete = true
-    Fuse.unmount = (mnt, cb) => process.nextTick(cb, null)
+    helperResult = null
     binding.fuse_native_unmount = (thread, cb) => process.nextTick(cb, cleanupError)
     fuse._nativeMounted = true
     fuse._thread = Buffer.alloc(8)

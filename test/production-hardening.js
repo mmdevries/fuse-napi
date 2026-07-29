@@ -173,6 +173,76 @@ tape('repeated bounded-worker dispatch and cleanup remain lossless', function (t
   }
 })
 
+tape('timed-out requests and native teardown remain bounded across cycles', function (t) {
+  if (process.platform !== 'linux') {
+    t.skip('Linux-specific timeout teardown stress')
+    t.end()
+    return
+  }
+
+  t.timeoutAfter(30000)
+  const cycles = 20
+  let timedOut = 0
+
+  run().then(function () {
+    t.equal(timedOut, cycles, 'every stalled request reached its operation deadline')
+    t.pass('every timed-out filesystem completed native teardown')
+    t.end()
+  }, function (err) {
+    t.fail(err.stack || err.message)
+    t.end()
+  })
+
+  async function run () {
+    for (let cycle = 0; cycle < cycles; cycle++) {
+      const mnt = createMountpoint()
+      let mounted = false
+      const fuse = new Fuse(mnt, {
+        getattr (name, cb) {
+          if (name === '/') {
+            return process.nextTick(cb, 0, stat({ mode: 'dir', size: 4096 }))
+          }
+          if (name === '/file') {
+            return process.nextTick(cb, 0, stat({ mode: 'file', size: 4 }))
+          }
+          return process.nextTick(cb, Fuse.ENOENT)
+        },
+        open (name, flags, cb) {
+          process.nextTick(cb, 0, 1)
+        },
+        read (name, fd, buffer, length, position, cb) {
+          // Deliberately exercise teardown immediately after request timeout.
+        },
+        release (name, fd, cb) {
+          process.nextTick(cb, 0)
+        }
+      }, {
+        force: true,
+        timeout: { default: 5000, read: 10 },
+        maxConcurrency: 4
+      })
+
+      try {
+        await deadline(mount(fuse), `timeout mount cycle ${cycle}`)
+        mounted = true
+        try {
+          await deadline(fs.promises.readFile(path.join(mnt, 'file')), `timeout read cycle ${cycle}`)
+          throw new Error(`timeout read cycle ${cycle} unexpectedly succeeded`)
+        } catch (err) {
+          if (!err || err.code !== 'ETIMEDOUT') throw err
+          timedOut++
+        }
+      } finally {
+        try {
+          if (mounted) await deadline(closeImmediately(fuse), `timeout unmount cycle ${cycle}`)
+        } finally {
+          await fs.promises.rmdir(mnt)
+        }
+      }
+    }
+  }
+})
+
 function mount (fuse) {
   return new Promise((resolve, reject) => {
     fuse.mount(err => err ? reject(err) : resolve())

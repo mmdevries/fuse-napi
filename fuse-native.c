@@ -31,6 +31,11 @@ static void fuse_native_complete_local(fuse_thread_locals_t *l, int32_t result);
 static void fuse_native_release_local_payload(fuse_thread_locals_t *l);
 static void fuse_native_capture_context(fuse_thread_locals_t *l);
 static int fuse_native_schedule_local(fuse_thread_locals_t *l);
+static void fuse_native_dispose_mount(
+  const char *mnt,
+  struct fuse *fuse,
+  struct fuse_chan *ch
+);
 static napi_status create_request_context_value(
   napi_env env,
   const fuse_thread_locals_t *l,
@@ -1776,6 +1781,21 @@ static void fuse_native_cancel_workers_locked (fuse_thread_t *ft) {
   }
 }
 
+static void fuse_native_dispose_mount (
+  const char *mnt,
+  struct fuse *fuse,
+  struct fuse_chan *ch
+) {
+  /*
+   * FUSE 2 fuse_unmount() clears the channel fd, unmounts the kernel
+   * filesystem, removes the channel from its session, and destroys the
+   * channel. Never pass ch to fuse_session_remove_chan() afterwards: ch no
+   * longer exists. fuse_destroy() can then destroy the channel-free session.
+   */
+  if (ch != NULL) fuse_unmount(mnt, ch);
+  if (fuse != NULL) fuse_destroy(fuse);
+}
+
 static void* start_fuse_thread (void *data) {
   fuse_thread_t *ft = (fuse_thread_t *) data;
   struct fuse_session *session = fuse_get_session(ft->fuse);
@@ -1867,9 +1887,7 @@ static void* start_fuse_thread (void *data) {
   uv_mutex_unlock(&(ft->mut));
   free(workers);
 
-  if (ch != NULL) fuse_unmount(ft->mnt, ch);
-  if (fuse != NULL && ch != NULL) fuse_session_remove_chan(ch);
-  if (fuse != NULL) fuse_destroy(fuse);
+  fuse_native_dispose_mount(ft->mnt, fuse, ch);
 
   if (!atomic_load(&(ft->cleanup_requested))) {
     int result = uv_async_send(&(ft->loop_exit_async));
@@ -1967,9 +1985,7 @@ static void fuse_native_loop_exit_dispatch (uv_async_t *handle) {
 static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
   ft->mount_cleanup_pending = 1;
   if (ft->fuse != NULL || ft->ch != NULL) {
-    if (ft->ch != NULL) fuse_unmount(ft->mnt, ft->ch);
-    if (ft->fuse != NULL && ft->ch != NULL) fuse_session_remove_chan(ft->ch);
-    if (ft->fuse != NULL) fuse_destroy(ft->fuse);
+    fuse_native_dispose_mount(ft->mnt, ft->fuse, ft->ch);
     ft->fuse = NULL;
     ft->ch = NULL;
   }
