@@ -10,11 +10,12 @@ const ciWorkflow = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 
 const macosWorkflow = path.join(root, '.github/workflows/macos-integration.yml')
 const releaseWorkflow = fs.readFileSync(path.join(root, '.github/workflows/prebuilds.yml'), 'utf8')
 const releaseGuide = fs.readFileSync(path.join(root, 'RELEASING.md'), 'utf8')
+const releaseTag = `v${require('../package.json').version}`
 
 tape('release metadata accepts the exact package tag', function (t) {
   const result = verify({
     GITHUB_REF_TYPE: 'tag',
-    GITHUB_REF_NAME: 'v1.0.0'
+    GITHUB_REF_NAME: releaseTag
   })
 
   t.equal(result.status, 0, result.stderr || 'exact release tag is accepted')
@@ -24,11 +25,14 @@ tape('release metadata accepts the exact package tag', function (t) {
 tape('release metadata rejects a mismatched package tag', function (t) {
   const result = verify({
     GITHUB_REF_TYPE: 'tag',
-    GITHUB_REF_NAME: 'v1.0.1'
+    GITHUB_REF_NAME: `${releaseTag}-mismatch`
   })
 
   t.equal(result.status, 1, 'mismatched release tag is rejected')
-  t.match(result.stderr, /must equal "v1\.0\.0"/, 'failure identifies the expected tag')
+  t.ok(
+    result.stderr.includes(`must equal "${releaseTag}"`),
+    'failure identifies the expected tag'
+  )
   t.end()
 })
 

@@ -66,7 +66,15 @@ tape('bounded workers, Buffer operations, request context, and destroy integrate
       t.equal(contents.toString(), 'hello world', 'read_buf serves file contents')
       t.ok(readContext, 'native request context reaches Buffer operations')
       t.equal(readContext.uid, process.getuid(), 'request uid matches the caller')
-      t.equal(readContext.pid, process.pid, 'request pid matches the caller')
+      if (process.platform === 'linux') {
+        t.ok(
+          Number.isInteger(readContext.pid) &&
+            fs.existsSync(`/proc/${process.pid}/task/${readContext.pid}`),
+          'request pid identifies a calling thread in the current process'
+        )
+      } else {
+        t.equal(readContext.pid, process.pid, 'request pid matches the caller')
+      }
       t.equal(readContext.fileInfo.fd, 42, 'request file handle is exposed')
 
       const handle = await deadline(fs.promises.open(path.join(mnt, 'write'), 'r+'), 'open for write_buf')

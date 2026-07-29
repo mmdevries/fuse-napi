@@ -196,7 +196,9 @@ During an operation, `fuse.context()` returns a frozen snapshot containing
 context is isolated across promises and other asynchronous work with
 `AsyncLocalStorage`; outside an operation it returns `null`. When
 `nullPathOk` or `noPath` is enabled, the affected handle-based callbacks must
-accept `null` as their path.
+accept `null` as their path. On Linux, `pid` identifies the calling thread and
+can differ from `process.pid` when Node.js performs filesystem I/O in its
+libuv worker pool.
 
 TypeScript: see [index.d.ts](./index.d.ts).
 
