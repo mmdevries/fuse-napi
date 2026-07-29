@@ -64,10 +64,10 @@ tape('release verification requires every supported ABI prebuild', function (t) 
   }
 })
 
-tape('release artifacts retain automated Linux gates and manual macOS validation', function (t) {
+tape('release artifacts retain manually initiated production gates', function (t) {
   t.match(ciWorkflow, /\n  workflow_dispatch:\n/, 'CI remains manually dispatchable')
-  t.match(ciWorkflow, /\n  push:\n/, 'pushes automatically run the complete CI gate')
-  t.match(ciWorkflow, /\n  pull_request:\n/, 'pull requests automatically run the complete CI gate')
+  t.notOk(/\n  push:\n/.test(ciWorkflow), 'pushes cannot trigger CI')
+  t.notOk(/\n  pull_request:\n/.test(ciWorkflow), 'pull requests cannot trigger CI')
   t.match(ciWorkflow, /\n  workflow_call:\n/, 'the complete CI matrix is reusable by the release workflow')
   t.match(
     releaseWorkflow,

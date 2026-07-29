@@ -94,8 +94,9 @@ lifecycle, and option tests. `npm run test:fuzz` deterministically fuzzes the
 public validation boundary, and `npm run test:soak` repeatedly mounts,
 exercises, and unmounts the filesystem.
 
-The GitHub `CI` workflow runs for pushes and pull requests to `main` and `2.0`,
-and remains manually and programmatically reusable. In addition to the
+The GitHub `CI` workflow is started manually with `workflow_dispatch`; pushes
+and pull requests never trigger it. The manually started release workflow can
+reuse the same matrix through `workflow_call`. In addition to the
 platform/Node.js matrix, it builds against libfuse 3.18, exercises modern
 syscalls, runs static analysis, deterministic fuzzing, ASan/UBSan, and a mount
 soak test.

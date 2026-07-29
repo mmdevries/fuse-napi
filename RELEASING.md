@@ -9,8 +9,8 @@ Never rebuild or run `npm pack` from a development checkout for publication.
 
 1. Require two-factor authentication for npm publication and verify that the
    release maintainer has publish access to `fuse-napi`.
-2. Protect `main` and immutable release tags so the hosted CI and artifact
-   workflow cannot be bypassed.
+2. Protect `main` and immutable release tags so the manually initiated hosted
+   CI and artifact workflow cannot be bypassed.
 3. Prepare both a physical Intel Mac and a physical Apple Silicon Mac with a
    supported macOS release, an installed and approved macFUSE libfuse 3
    compatibility runtime, `pkg-config`, and supported Node.js versions.
@@ -37,7 +37,8 @@ not produce GitHub OIDC provenance.
    ```
 
 4. Commit the complete release candidate and push it to `main`.
-5. Wait for every hosted CI job to pass.
+5. Start the `CI` workflow manually for that exact commit and wait for every
+   hosted job to pass. Pushes and pull requests intentionally do not start CI.
 6. On both a physical Intel Mac and a physical Apple Silicon Mac, use a clean
    checkout of the exact release commit and run:
 
