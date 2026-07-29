@@ -1,4 +1,4 @@
-# FUSE 2.9 compatibility matrix
+# FUSE 3 compatibility matrix
 
 This document describes the current `fuse-napi` contract inherited from
 `@cocalc/fuse-native@2.4.3`, including the completed portability and
@@ -7,11 +7,12 @@ production-hardening work for the first stable release.
 ## Callback matrix
 
 All listed callbacks use the existing asynchronous JavaScript callback style.
-The native layer exposes the FUSE 2.9 high-level API.
+The native layer targets the FUSE 3.1 high-level API
+(`FUSE_USE_VERSION=31`) while retaining the callback contract from 1.x.
 
-| JavaScript callback | Linux libfuse 2 | macFUSE libfuse 2 | Current status and differences |
+| JavaScript callback | Linux libfuse 3 | macFUSE libfuse 3 | Current status and differences |
 | --- | --- | --- | --- |
-| `init(cb)` / `initWithConfig(connection, cb)` | Yes | Yes | Legacy defaults remain unchanged. The enhanced variant exposes and validates the portable FUSE 2 connection fields before applying conservative limits/capabilities. Public mount completion waits until the mounted device is visible. |
+| `init(cb)` / `initWithConfig(connection, cb)` | Yes | Yes | Legacy defaults remain unchanged. The enhanced variant exposes and validates the portable FUSE 3 connection fields before applying conservative limits/capabilities. Public mount completion waits until the mounted device is visible. |
 | `access(path, mode, cb)` | Yes | Yes | Shared implementation. Suppressed by `default_permissions`. |
 | `statfs(path, cb)` | Yes | Yes | Shared `struct statvfs` implementation with range-checked 64-bit fields. macFUSE also offers unsupported `statfs_x`. |
 | `getattr(path, cb)` | Yes | Yes | Shared, zero-initialized implementation with range-checked 64-bit fields and platform-specific timestamp members. |
@@ -54,11 +55,10 @@ The native layer exposes the FUSE 2.9 high-level API.
 | `readBuffer(path, fd, length, position, cb)` | Yes | Yes | Implements `read_buf` with libfuse-compatible native ownership. Mutually exclusive with `read`. |
 | `fallocate(path, fd, mode, offset, length, cb)` | Yes | Yes | Shared implementation with signed, lossless 64-bit range transport. |
 
-### Deprecated FUSE 2.9 callbacks
+### Deprecated FUSE callbacks
 
-Every non-deprecated portable callback in the FUSE 2.9 high-level API is
-exposed. The two superseded callbacks are intentionally represented by their
-modern equivalents:
+The portable callback contract from 1.x remains exposed. The two superseded
+callbacks are intentionally represented by their modern equivalents:
 
 | Callback | Status | Decision |
 | --- | --- | --- |
@@ -73,12 +73,12 @@ They are deliberately outside the first milestone:
 | --- | --- | --- |
 | `monitor` | Finder/file watcher count changes | Defer; macFUSE-specific. |
 | `renamex` | macOS rename flags | Use standard `rename`; test Finder fallbacks. |
-| `statfs_x` | Darwin `struct statfs` | Use portable `statfs`. |
+| Darwin `statfs` ABI | Darwin `struct statfs` | Adapted to the portable JavaScript `statfs` result. |
 | `setvolname` | Change volume name | Use the `volname` mount option. |
 | `exchange` | Exchange two paths | Defer; unsupported on recent macOS versions. |
 | `getxtimes`, `setbkuptime`, `setchgtime`, `setcrtime` | macOS extended timestamps | Defer; test portable timestamps first. |
 | `chflags` | BSD file flags | Defer. |
-| `setattr_x`, `fsetattr_x` | Compound Darwin attribute updates | Defer; use standard callbacks. |
+| Compound Darwin `setattr` | Metadata updates | Adapted in a stable chmod/chown/truncate/utimens sequence. |
 
 ## Mount-option matrix
 
@@ -101,7 +101,7 @@ platform mount helper decides whether it is accepted.
 | `subtype` | `subtype=<name>` | Yes | Pass-through | Verify Finder and `mount` output on macOS. |
 | `kernelCache` | `kernel_cache` | Yes | Yes | High-level libfuse option. |
 | `autoCache` | `auto_cache` | Yes | Yes | High-level libfuse option; timestamp correctness matters. |
-| `directIo` | `direct_io` | Yes | Pass-through | Enables direct I/O for every opened file. This is separate from returning `directIO` for one `open` or `create` result. |
+| `directIo` | `fuse_config.direct_io` | Yes | Yes | Applied during FUSE 3 initialization. This is separate from returning `directIO` for one `open` or `create` result. |
 | `umask` | `umask=<mask>` | Yes | Pass-through | Explicit zero is preserved; chmod behavior is covered. |
 | `uid` | `uid=<n>` | Yes | Yes | Explicit zero is preserved; ownership behavior is covered. |
 | `gid` | `gid=<n>` | Yes | Yes | Explicit zero is preserved; ownership behavior is covered. |
@@ -109,7 +109,7 @@ platform mount helper decides whether it is accepted.
 | `attrTimeout` | `attr_timeout=<s>` | Yes | Pass-through | Cache invalidation behavior needs tests. |
 | `acAttrTimeout` | `ac_attr_timeout=<s>` | Yes | Pass-through | Used with auto-cache; verify macFUSE support. |
 | `noforget` | `noforget` | Yes | Pass-through | High memory-retention risk. |
-| `nonEmpty` | `nonempty` | Yes | Pass-through | Mount safety semantics differ by helper. |
+| `nonEmpty` | Compatibility no-op | Yes | Yes | Deprecated: FUSE 3 removed `nonempty` and permits non-empty mountpoints. |
 | `remember` | `remember=<s>` | Yes | Pass-through | High-level libfuse path-cache behavior. |
 | `modules` | `modules=<list>` | Yes | Pass-through | Depends on separately available FUSE modules. |
 | `displayFolder` | `volname`, optionally `volicon` | No-op | Yes | Uses `name` or mount basename; only emitted on macOS. |
@@ -119,10 +119,10 @@ platform mount helper decides whether it is accepted.
 | `name` | Source for `volname` | No-op | Yes | Used only when `displayFolder` is enabled. |
 | `onError` | JavaScript exception reporter | Yes | Yes | Receives operation exceptions and rejected promises before the request is completed with `EIO`. |
 | `maxConcurrency` | Fixed native request-worker count | Yes | Yes | Integer from 1 through 64; defaults to 4 and bounds threads, outstanding callbacks, and request memory. |
-| `nullPathOk` | `flag_nullpath_ok` | Yes | Yes | Allows `null` paths for the FUSE callbacks for which the FUSE 2 contract permits it. |
-| `noPath` | `flag_nopath` | Yes | Yes | Avoids path reconstruction for supported handle-based callbacks; those callbacks must accept a `null` path. |
+| `nullPathOk` | `fuse_config.nullpath_ok` | Yes | Yes | Allows `null` paths for supported handle-based callbacks. |
+| `noPath` | `fuse_config.nullpath_ok` compatibility mapping | Yes | Yes | Retains the 1.x behavior; affected callbacks must accept a `null` path. |
 
-Exact native libfuse 2 spellings are also accepted for JavaScript options whose
+Historical native libfuse spellings are also accepted for JavaScript options whose
 names differ: `allow_other`, `allow_root`, `auto_unmount`,
 `default_permissions`, `max_read`, `user_id`, `kernel_cache`, `auto_cache`,
 `direct_io`, `entry_timeout`, `attr_timeout`, `ac_attr_timeout`, `nonempty`,

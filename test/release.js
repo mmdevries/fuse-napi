@@ -81,6 +81,10 @@ tape('release artifacts retain automated Linux gates and manual macOS validation
     /Mount and exercise the exact Linux npm tarball/,
     'the assembled Linux package must perform a real mount'
   )
+  t.match(ciWorkflow, /libfuse3-dev/, 'CI builds against FUSE 3 headers')
+  t.match(ciWorkflow, /libfuse3\.so\.3/, 'CI verifies the FUSE 3 runtime ABI')
+  t.notOk(/\blibfuse-dev\b/.test(ciWorkflow), 'CI no longer installs FUSE 2 headers')
+  t.match(releaseWorkflow, /node-version: 26/, 'release smoke tests include Node.js 26')
   t.notOk(
     fs.existsSync(macosWorkflow),
     'the standalone self-hosted macOS workflow is absent'

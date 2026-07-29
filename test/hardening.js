@@ -30,7 +30,7 @@ tape('constructor and mount option inputs are validated', function (t) {
   )
   t.throws(
     () => new Fuse('/tmp/fuse-napi-unsupported-handler', { error () {} }),
-    /not a FUSE 2 operation/,
+    /not a supported FUSE operation/,
     'nonexistent legacy operation is rejected'
   )
   t.throws(
@@ -40,7 +40,7 @@ tape('constructor and mount option inputs are validated', function (t) {
   )
   t.throws(
     () => new Fuse('/tmp/fuse-napi-unknown-operation', { getatrr () {} }),
-    /Unknown FUSE 2 operation/,
+    /Unknown FUSE operation/,
     'misspelled operations are rejected'
   )
   t.throws(
@@ -104,7 +104,7 @@ tape('unmount passes the mountpoint as a literal process argument', function (t)
   const dangerousPath = '/tmp/fuse;touch /tmp/should-not-exist'
 
   childProcess.execFile = function (command, args, options, cb) {
-    t.ok(command === 'diskutil' || command === 'fusermount', 'known unmount executable is selected')
+    t.ok(command === 'diskutil' || command === 'fusermount3', 'known unmount executable is selected')
     t.equal(args[args.length - 1], dangerousPath, 'mountpoint remains one literal argument')
     t.equal(options.shell, false, 'no shell is involved')
     t.equal(options.timeout, 15000, 'standalone unmount has a finite deadline')
@@ -149,7 +149,8 @@ tape('native mount startup is asynchronous, bounded, and cancellable', function 
     timeout: { default: false, init: 20 },
     maxConcurrency: 3,
     nullPathOk: true,
-    noPath: true
+    noPath: true,
+    directIo: true
   })
 
   fuse._open(function (err) {
@@ -160,7 +161,7 @@ tape('native mount startup is asynchronous, bounded, and cancellable', function 
     t.ok(err, 'startup deadline completes even while native mount work is pending')
     t.equal(cancellations, 1, 'pending native mount receives one cancellation request')
     t.equal(mountArguments[6], 3, 'configured worker bound reaches the native layer')
-    t.equal(mountArguments[7], 7, 'null-path and timespec flags reach the native layer')
+    t.equal(mountArguments[7], 15, 'FUSE 3 config flags reach the native layer')
     t.equal(typeof mountArguments[8], 'function', 'unexpected loop exit callback is installed')
     t.equal(typeof mountArguments[9], 'function', 'asynchronous mount completion callback is installed')
     t.equal(fuse._nativeMountPending, true, 'state remains retained until native cancellation finishes')
@@ -567,7 +568,7 @@ tape('timespec input preserves nanoseconds and special utimens values', function
   t.end()
 })
 
-tape('remaining portable FUSE 2 operation contracts are validated and lossless', function (t) {
+tape('remaining portable FUSE operation contracts are validated and lossless', function (t) {
   const calls = []
   const input = Buffer.from([1, 2, 3, 4])
   const output = Buffer.from([4, 3, 2, 1])

@@ -63,8 +63,8 @@ tape('native libfuse option names are normalized aliases', function (t) {
     ['entry_timeout', 'entryTimeout', 1.5, '-oentry_timeout=1.5'],
     ['attr_timeout', 'attrTimeout', 2.5, '-oattr_timeout=2.5'],
     ['ac_attr_timeout', 'acAttrTimeout', 3.5, '-oac_attr_timeout=3.5'],
-    ['nonempty', 'nonEmpty', true, '-ononempty'],
-    ['direct_io', 'directIo', true, '-odirect_io'],
+    ['nonempty', 'nonEmpty', true, ''],
+    ['direct_io', 'directIo', true, ''],
     ['nopath', 'noPath', true, '']
   ]
 
@@ -127,7 +127,7 @@ tape('mixed application mount configuration remains compatible', function (t) {
 
   t.deepEqual(
     fuse._fuseOptions().slice(2).split(','),
-    ['allow_other', 'direct_io', 'nonempty'],
+    ['allow_other'],
     'canonical and native names compose without duplicate mount options'
   )
   t.end()

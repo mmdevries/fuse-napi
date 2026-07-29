@@ -4,11 +4,12 @@
 
 | Version | Security updates |
 | --- | --- |
-| 1.x | Yes |
+| 2.x | Yes |
+| 1.x | Critical fixes during the documented transition window |
 | 0.0.x | No |
 
-Only the latest `1.x` release receives security fixes. Users should also keep
-their operating-system FUSE 2 or macFUSE runtime current.
+The latest `2.x` release is the actively supported line. Users should also
+keep their operating-system libfuse 3 or macFUSE 5 runtime current.
 
 ## Reporting a vulnerability
 
@@ -36,6 +37,6 @@ filesystem implementation. Applications remain responsible for authorization,
 path policy, data validation, secrets, and safe use of options such as
 `allowOther`, `allowRoot`, and `defaultPermissions`.
 
-The package dynamically links the host's FUSE 2 runtime. Vulnerabilities in
-libfuse, macFUSE, the kernel extension, or the operating system should also be
-reported to their respective maintainers.
+The package dynamically links the host's libfuse 3 or macFUSE 5 runtime.
+Vulnerabilities in libfuse, macFUSE, the kernel extension, or the operating
+system should also be reported to their respective maintainers.

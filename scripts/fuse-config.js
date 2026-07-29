@@ -5,6 +5,8 @@ const { spawnSync } = require('child_process')
 
 const { MACFUSE_URL } = require('../lib/macfuse')
 
+const MINIMUM_LIBFUSE3_VERSION = [3, 10, 3]
+
 if (require.main === module) {
   try {
     const config = discover()
@@ -29,10 +31,18 @@ function discover (
   pkgConfig = runPkgConfig,
   exists = fs.existsSync
 ) {
-  const version = pkgConfig(['--modversion', 'fuse'])
-  if (version && /^2\./.test(version.trim())) {
-    const cflags = pkgConfig(['--cflags-only-I', 'fuse'])
-    const libraries = pkgConfig(['--libs', 'fuse'])
+  const version = pkgConfig(['--modversion', 'fuse3'])
+  if (version !== null) {
+    const normalizedVersion = version.trim()
+    if (!isSupportedVersion(normalizedVersion)) {
+      throw new Error(
+        `Unsupported libfuse3 version ${normalizedVersion || '(empty)'}. ` +
+        `fuse-napi requires libfuse >=${MINIMUM_LIBFUSE3_VERSION.join('.')}.`
+      )
+    }
+
+    const cflags = pkgConfig(['--cflags-only-I', 'fuse3'])
+    const libraries = pkgConfig(['--libs', 'fuse3'])
     if (cflags !== null && libraries !== null) {
       return {
         includeDirs: words(cflags).map(flag => flag.replace(/^-I/, '')),
@@ -42,28 +52,28 @@ function discover (
   }
 
   if (platform === 'darwin') {
-    const include = '/usr/local/include/fuse'
+    const include = '/usr/local/include/fuse3'
     const dylibs = [
-      '/usr/local/lib/libfuse.dylib',
-      '/usr/local/lib/libfuse.2.dylib'
+      '/usr/local/lib/libfuse3.dylib',
+      '/usr/local/lib/libfuse3.4.dylib'
     ]
     if (exists(`${include}/fuse.h`) && dylibs.some(exists)) {
       return {
         includeDirs: [include],
-        libraries: ['-L/usr/local/lib', '-lfuse', '-pthread']
+        libraries: ['-L/usr/local/lib', '-lfuse3', '-pthread']
       }
     }
 
     throw new Error(
-      'macFUSE with its libfuse 2 compatibility headers is required to build fuse-napi on macOS. ' +
+      'macFUSE 5 with its libfuse3 headers is required to build fuse-napi on macOS. ' +
       `Install macFUSE from ${MACFUSE_URL}; fuse-napi does not download or install it.`
     )
   }
 
   if (platform === 'linux') {
     throw new Error(
-      'System libfuse 2 development files and pkg-config are required to build fuse-napi on Linux. ' +
-      'On Debian or Ubuntu, run: sudo apt-get install libfuse-dev pkg-config'
+      'System libfuse3 development files, the FUSE 3 mount helper, and pkg-config are required to build fuse-napi on Linux. ' +
+      'On Debian or Ubuntu, run: sudo apt-get install libfuse3-dev fuse3 pkg-config'
     )
   }
 
@@ -80,6 +90,18 @@ function runPkgConfig (args) {
 
 function words (value) {
   return value.trim() ? value.trim().split(/\s+/) : []
+}
+
+function isSupportedVersion (version) {
+  const match = /^(\d+)\.(\d+)\.(\d+)(?:[.-].*)?$/.exec(version)
+  if (!match) return false
+
+  const actual = match.slice(1).map(Number)
+  for (let i = 0; i < MINIMUM_LIBFUSE3_VERSION.length; i++) {
+    if (actual[i] > MINIMUM_LIBFUSE3_VERSION[i]) return true
+    if (actual[i] < MINIMUM_LIBFUSE3_VERSION[i]) return false
+  }
+  return true
 }
 
 module.exports = {

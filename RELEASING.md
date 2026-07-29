@@ -12,7 +12,7 @@ Never rebuild or run `npm pack` from a development checkout for publication.
 2. Protect `main` and immutable release tags so the hosted CI and artifact
    workflow cannot be bypassed.
 3. Prepare both a physical Intel Mac and a physical Apple Silicon Mac with a
-   supported macOS release, an installed and approved macFUSE libfuse 2
+   supported macOS release, an installed and approved macFUSE libfuse 3
    compatibility runtime, `pkg-config`, and supported Node.js versions.
 
 No self-hosted GitHub runners, npm trusted publisher, `npm-production`
@@ -51,8 +51,8 @@ not produce GitHub OIDC provenance.
 7. Create an immutable annotated tag matching the package version exactly:
 
    ```sh
-   git tag -a v1.0.0 -m "fuse-napi v1.0.0"
-   git push origin v1.0.0
+   git tag -a v2.0.0 -m "fuse-napi v2.0.0"
+   git push origin v2.0.0
    ```
 
 8. In GitHub Actions, manually run `Node-API prebuilds` on the exact release
@@ -91,7 +91,7 @@ not produce GitHub OIDC provenance.
     unset FUSE_NAPI_OTP
     ```
 
-Use a version such as `1.0.0-rc.1` first when validating release changes.
+Use a version such as `2.0.0-rc.1` first when validating release changes.
 Prerelease tags publish under npm's `next` dist-tag; stable versions publish
 under `latest`.
 
@@ -102,8 +102,8 @@ The manually confirmed workflow on the exact release tag:
 - rejects a tag that differs from `package.json` or `package-lock.json`;
 - invokes the complete Linux and hosted macOS CI matrix as a hard dependency;
 - builds four native Node-API prebuilds;
-- verifies architecture, libfuse 2 linkage, glibc 2.31, and macOS 12 baselines;
-- loads each prebuild on Node.js 20, 22, and 24;
+- verifies architecture, libfuse 3 linkage, glibc 2.31, and macOS 12 baselines;
+- loads each prebuild on Node.js 22, 24, and 26;
 - assembles one npm tarball containing all four binaries;
 - verifies and installs that exact tarball on all four target platforms;
 - performs real mounts with that tarball on Linux x64/arm64;
@@ -120,8 +120,8 @@ Verify the registry metadata and install the published artifact on at least
 one clean Linux and one clean macOS host:
 
 ```sh
-npm view fuse-napi@1.0.0 version dist.integrity
-npm install fuse-napi@1.0.0
+npm view fuse-napi@2.0.0 version dist.integrity
+npm install fuse-napi@2.0.0
 node -e "require('fuse-napi')"
 ```
 

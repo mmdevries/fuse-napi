@@ -1,6 +1,7 @@
 # fuse-napi
 
-Node-API bindings for the FUSE 2.9 high-level API on Linux and macOS.
+Production-grade Node-API bindings for the FUSE 3 high-level API on Linux and
+macOS.
 
 Install the stable package from npm:
 
@@ -13,14 +14,14 @@ for release notes and migration details.
 
 This project starts from the exact published source of
 [`@cocalc/fuse-native@2.4.3`](https://www.npmjs.com/package/@cocalc/fuse-native/v/2.4.3).
-It preserves that package's callback-based JavaScript API and uses
-`FUSE_USE_VERSION=29`. The native addon uses Node-API, with no direct V8 API
+It preserves that package's callback-based JavaScript API while using
+`FUSE_USE_VERSION=31`. The native addon uses Node-API, with no direct V8 API
 dependency.
 
-The addon dynamically links an external FUSE 2 library:
+The addon dynamically links an external FUSE 3 library:
 
-- Linux uses the system `libfuse.so.2`.
-- macOS uses the `libfuse.2.dylib` compatibility library installed by
+- Linux uses the system `libfuse3.so.3`.
+- macOS uses the `libfuse3` runtime installed by
   [macFUSE](https://macfuse.github.io/).
 
 Neither libfuse nor macFUSE is bundled or installed by this package. See
@@ -31,8 +32,8 @@ Neither libfuse nor macFUSE is bundled or installed by this package. See
 
 | Platform | Minimum runtime | Architectures | Tested Node.js |
 | --- | --- | --- | --- |
-| Linux | glibc 2.31 and system libfuse 2 | x86-64, arm64 | 20, 22, 24 |
-| macOS | macOS 12 and macFUSE libfuse 2 | Intel x86-64, Apple Silicon arm64 | 20, 22, 24 |
+| Linux | glibc 2.31 and libfuse 3.10.3+ | x86-64, arm64 | 22, 24, 26 |
+| macOS | macOS 12 and macFUSE 5 with libfuse 3 | Intel x86-64, Apple Silicon arm64 | 22, 24, 26 |
 
 Release prebuilds are compiled on a glibc 2.31 Linux baseline and with
 `MACOSX_DEPLOYMENT_TARGET=12.0`. The release workflow rejects binaries that
@@ -43,13 +44,13 @@ raise either minimum accidentally.
 ### Linux
 
 Building from source requires a C/C++ toolchain, `pkg-config`, and the system
-libfuse 2 development package. Running a prebuild still requires the system
-libfuse 2 runtime.
+libfuse 3 development package. Running a prebuild still requires the system
+libfuse 3 runtime.
 
 On Debian or Ubuntu:
 
 ```sh
-sudo apt-get install build-essential fuse libfuse-dev pkg-config
+sudo apt-get install build-essential fuse3 libfuse3-dev pkg-config
 ```
 
 ### macOS
@@ -70,7 +71,7 @@ No privileged package configuration command is installed or run. Host FUSE
 installation and system-extension approval remain explicit administrator
 tasks.
 
-`fuse-napi` uses macFUSE's public libfuse 2 compatibility API and its default
+`fuse-napi` uses macFUSE's public libfuse 3 API and its default
 VFS backend. It does not implement FSKit directly. If the headers, dylib, or
 runtime are unavailable, installation/loading fails with an actionable
 macFUSE error.
@@ -91,7 +92,7 @@ The GitHub `CI` workflow starts only through **Actions → CI → Run workflow**
 The manually triggered prebuild workflow can also invoke the same CI matrix
 through its reusable `workflow_call` entry point.
 
-The test suite is green on Linux arm64 with libfuse 2.9.9 and on Apple Silicon
+The test suite is green on Linux arm64 with libfuse 3.10.3 and on Apple Silicon
 with macFUSE 5.3.3. Hosted CI is configured to build both macOS architectures
 but cannot load the macFUSE kernel extension. Real macOS mount integration is
 therefore a documented manual release check on physical Intel and Apple
@@ -152,8 +153,8 @@ Create a new `Fuse` object.
   debug: false,        // Enable detailed tracing of operations.
   force: false,        // Attempt to unmount before remounting.
   mkdir: false,        // Create the mountpoint before mounting.
-  nonEmpty: false,     // Allow mounting over a non-empty directory.
-  directIo: false,     // Use direct I/O for every opened file.
+  nonEmpty: false,     // Deprecated compatibility no-op on FUSE 3.
+  directIo: false,     // Set fuse_config.direct_io for every opened file.
   timeout: 15000,      // Operation and mount-start timeout in milliseconds.
   maxConcurrency: 4,   // Fixed native request-worker count (1 through 64).
   nullPathOk: false,   // Accept null paths for unlinked handle operations.
@@ -173,14 +174,16 @@ exception, or rejected promise is translated to a FUSE error and cannot leave
 the native worker blocked. Return values, buffer lengths, directory entries,
 extended attributes, statistics, and mount options are validated before they
 cross the native boundary. Unknown option and operation names are rejected so
-configuration mistakes cannot silently change filesystem behavior.
+configuration mistakes cannot silently change filesystem behavior. See the
+2.0.0 section in [CHANGELOG.md](./CHANGELOG.md) when upgrading from the 1.x
+line.
 For mount options with a native snake-case spelling, both the JavaScript name
-and the exact libfuse 2 name are accepted (for example, `nonEmpty`/`nonempty`,
+and the historical libfuse name are accepted (for example, `nonEmpty`/`nonempty`,
 `directIo`/`direct_io`, and `allowOther`/`allow_other`). Inputs are normalized
 to the JavaScript name, and conflicting aliases are rejected.
 
 The native request loop uses exactly `maxConcurrency` workers instead of
-libfuse 2's dynamically growing multithreaded loop. This bounds native
+libfuse's dynamically growing multithreaded loop. This bounds native
 threads, outstanding JavaScript callbacks, and memory use under load. Mount
 startup runs outside the JavaScript event loop and remains subject to the
 configured `init` deadline.
@@ -190,9 +193,11 @@ For a larger usage example, see CoCalc's
 
 ### FUSE API
 
-The complete non-deprecated, portable FUSE 2.9 high-level callback surface is
-supported. Deprecated `getdir` and `utime` are represented by `readdir` and
-`utimens`. In general the callback for each op should be called with
+The portable callback surface from 1.x remains supported on FUSE 3.
+Deprecated `getdir` and `utime` are represented by `readdir` and `utimens`.
+FUSE 3's merged `getattr`/`fgetattr` and `truncate`/`ftruncate` operations are
+routed to the existing handlers based on whether a file handle is present. In
+general the callback for each op should be called with
 `cb(returnCode, [value])`, where the return code is a number (`0` for OK and
 `< 0` for errors). See below for a list of POSIX error codes.
 
@@ -219,7 +224,7 @@ Called on filesystem init.
 #### `ops.initWithConfig(connection, cb)`
 
 Enhanced, mutually exclusive alternative to `init`. `connection` is a frozen
-snapshot of the portable FUSE 2 connection fields:
+snapshot of the portable FUSE 3 connection fields:
 `protoMajor`, `protoMinor`, `asyncRead`, `maxWrite`, `maxReadahead`,
 `capable`, `want`, `maxBackground`, and `congestionThreshold`.
 
@@ -329,7 +334,7 @@ ops.readlink = function (path, cb) {
 ```
 
 Targets longer than the kernel-provided buffer are truncated and
-NUL-terminated as required by the FUSE 2 high-level callback contract.
+NUL-terminated as required by the FUSE high-level callback contract.
 
 #### `ops.chown(path, uid, gid, cb)`
 
@@ -495,7 +500,7 @@ second callback argument. This is meaningful for block-device-backed mounts.
 
 #### `ops.ioctl(path, fd, command, argument, flags, data, cb)`
 
-Handles bounded, well-formed FUSE 2 ioctls. `argument` and file handles remain
+Handles bounded, well-formed FUSE ioctls. `argument` and file handles remain
 lossless, and `data` is request-owned. Return a same-length output Buffer.
 Unrestricted retry/iovec ioctls are rejected with `EOPNOTSUPP` because their
 borrowed-pointer protocol cannot be represented safely by this callback API.

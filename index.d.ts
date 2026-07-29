@@ -335,50 +335,51 @@ declare namespace Fuse {
     force?: boolean;
     mkdir?: boolean;
     allowOther?: boolean;
-    /** Native libfuse 2 spelling for allowOther. */
+    /** Native libfuse spelling for allowOther. */
     allow_other?: boolean;
     allowRoot?: boolean;
-    /** Native libfuse 2 spelling for allowRoot. */
+    /** Native libfuse spelling for allowRoot. */
     allow_root?: boolean;
     autoUnmount?: boolean;
-    /** Native libfuse 2 spelling for autoUnmount. */
+    /** Native libfuse spelling for autoUnmount. */
     auto_unmount?: boolean;
     defaultPermissions?: boolean;
-    /** Native libfuse 2 spelling for defaultPermissions. */
+    /** Native libfuse spelling for defaultPermissions. */
     default_permissions?: boolean;
     blkdev?: boolean;
     blksize?: number;
     maxRead?: number;
-    /** Native libfuse 2 spelling for maxRead. */
+    /** Native libfuse spelling for maxRead. */
     max_read?: number;
+    /** Deprecated compatibility no-op: FUSE 3 removed the nonempty option. */
     nonEmpty?: boolean;
-    /** Native libfuse 2 spelling for nonEmpty. */
+    /** Historical alias retained as a FUSE 3 no-op. */
     nonempty?: boolean;
     fd?: number;
     userId?: number;
-    /** Native libfuse 2 spelling for userId. */
+    /** Native libfuse spelling for userId. */
     user_id?: number;
     fsname?: string;
     subtype?: string;
     kernelCache?: boolean;
-    /** Native libfuse 2 spelling for kernelCache. */
+    /** Native libfuse spelling for kernelCache. */
     kernel_cache?: boolean;
     autoCache?: boolean;
-    /** Native libfuse 2 spelling for autoCache. */
+    /** Native libfuse spelling for autoCache. */
     auto_cache?: boolean;
-    /** Enable direct I/O for every opened file. */
+    /** Enable direct I/O for every opened file through fuse_config. */
     directIo?: boolean;
-    /** Native libfuse 2 spelling for directIo. */
+    /** Historical native spelling for directIo. */
     direct_io?: boolean;
     umask?: number;
     entryTimeout?: number;
-    /** Native libfuse 2 spelling for entryTimeout. */
+    /** Native libfuse spelling for entryTimeout. */
     entry_timeout?: number;
     attrTimeout?: number;
-    /** Native libfuse 2 spelling for attrTimeout. */
+    /** Native libfuse spelling for attrTimeout. */
     attr_timeout?: number;
     acAttrTimeout?: number;
-    /** Native libfuse 2 spelling for acAttrTimeout. */
+    /** Native libfuse spelling for acAttrTimeout. */
     ac_attr_timeout?: number;
     noforget?: boolean;
     remember?: number;
@@ -391,7 +392,7 @@ declare namespace Fuse {
     nullPathOk?: boolean;
     /** Avoid path reconstruction for supported handle-based operations. */
     noPath?: boolean;
-    /** Native libfuse 2 spelling for noPath. */
+    /** Historical native spelling for noPath. */
     nopath?: boolean;
   }
 }

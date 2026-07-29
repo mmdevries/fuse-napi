@@ -5,6 +5,38 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
+## 2.0.0 - 2026-07-29
+
+### Added
+
+- Native FUSE 3 support on Linux through `libfuse3.so.3` and on macOS through
+  macFUSE 5's libfuse 3 runtime.
+- Explicit macFUSE Darwin adapters for attributes, compound `setattr`,
+  `statfs`, directory entries, resource-fork xattrs, and platform-specific
+  `UTIME_NOW`/`UTIME_OMIT` encodings.
+- A production migration plan and a focused 1.x-to-2.x consumer migration
+  guide.
+
+### Changed
+
+- The native API target is now `FUSE_USE_VERSION=31`. Mount construction,
+  unmounting, request reception, request processing, and buffer ownership use
+  the FUSE 3 lifecycle without `fuse_chan`.
+- FUSE 3's merged `getattr`/`fgetattr` and `truncate`/`ftruncate` callbacks are
+  routed to the existing JavaScript operations based on file-handle presence.
+- `directIo` is applied through `fuse_config.direct_io`; the removed
+  `nonempty` option remains accepted as a deprecated no-op.
+- Linux unmount helpers use `fusermount3`. Build discovery and release
+  artifacts require `fuse3`/`libfuse3-dev` and verify libfuse 3 linkage.
+- Supported Node.js versions are 22, 24, and 26; the minimum is Node.js 22.
+
+### Compatibility
+
+- This is a native-runtime breaking release: Linux requires libfuse 3 and
+  macOS requires macFUSE 5 with its libfuse 3 headers and runtime. The 1.x
+  callback surface and TypeScript contracts remain source-compatible.
+- Release prebuilds retain the glibc 2.31 and macOS 12 deployment baselines.
+
 ## 1.1.1 - 2026-07-29
 
 ### Changed

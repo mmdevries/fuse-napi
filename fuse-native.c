@@ -1,4 +1,14 @@
-#define FUSE_USE_VERSION 29
+#define FUSE_USE_VERSION 31
+
+/*
+ * macFUSE's libfuse 3 ABI has Darwin-specific operation signatures for
+ * metadata and resource-fork support.  Keep those extensions enabled on
+ * macOS and bridge them to the portable JavaScript contract with explicit
+ * adapters below.
+ */
+#ifdef __APPLE__
+#define FUSE_DARWIN_ENABLE_EXTENSIONS 1
+#endif
 
 #include <uv.h>
 #include <node_api.h>
@@ -8,14 +18,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdollar-in-identifier-extension"
+#endif
 #include <fuse.h>
 #include <fuse_opt.h>
 #include <fuse_common.h>
 #include <fuse_lowlevel.h>
+#if defined(__APPLE__) && defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 #include <unistd.h>
 #include <sys/wait.h>
@@ -23,18 +41,31 @@
 #include <fcntl.h>
 #include <pthread.h>
 
+#ifdef __APPLE__
+/*
+ * macFUSE may return transport-owned message buffers.  Its libfuse 3 runtime
+ * exports this release helper even though it is not part of the portable
+ * header surface.
+ */
+extern void fuse_buf_free(struct fuse_buf *buf);
+#endif
+
 typedef struct fuse_thread_s fuse_thread_t;
 typedef struct fuse_thread_locals_s fuse_thread_locals_t;
 typedef struct fuse_worker_s fuse_worker_t;
+#if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
+typedef fuse_darwin_fill_dir_t fuse_native_fill_dir_t;
+#else
+typedef fuse_fill_dir_t fuse_native_fill_dir_t;
+#endif
 typedef void (*fuse_dispatch_fn)(uv_async_t *, fuse_thread_locals_t *, fuse_thread_t *);
 static void fuse_native_complete_local(fuse_thread_locals_t *l, int32_t result);
 static void fuse_native_release_local_payload(fuse_thread_locals_t *l);
 static void fuse_native_capture_context(fuse_thread_locals_t *l);
 static int fuse_native_schedule_local(fuse_thread_locals_t *l);
 static void fuse_native_dispose_mount(
-  const char *mnt,
   struct fuse *fuse,
-  struct fuse_chan *ch
+  int mounted
 );
 static napi_status create_request_context_value(
   napi_env env,
@@ -68,13 +99,13 @@ static napi_status initialize_callback_arguments(
 #define FUSE_NATIVE_HANDLER(name, blk)\
   fuse_thread_locals_t *l = get_thread_locals();\
   if (l == NULL) return -EIO;\
-  fuse_native_capture_context(l);\
   l->info = NULL;\
   l->owned_input = NULL;\
   l->pollhandle = NULL;\
   l->op = op_##name;\
   l->op_fn = fuse_native_dispatch_##name;\
   blk\
+  fuse_native_capture_context(l);\
   atomic_store(&(l->waiting), 1);\
   if (fuse_native_schedule_local(l) < 0) {\
     atomic_store(&(l->waiting), 0);\
@@ -219,9 +250,10 @@ static const uint32_t op_fallocate = 42;
 #define FUSE_OPERATION_FLAG_NULL_PATH_OK 1U
 #define FUSE_OPERATION_FLAG_NO_PATH 2U
 #define FUSE_OPERATION_FLAG_UTIME_OMIT_OK 4U
+#define FUSE_OPERATION_FLAG_DIRECT_IO 8U
 #define FUSE_OPERATION_FLAGS_ALLOWED \
   (FUSE_OPERATION_FLAG_NULL_PATH_OK | FUSE_OPERATION_FLAG_NO_PATH | \
-   FUSE_OPERATION_FLAG_UTIME_OMIT_OK)
+   FUSE_OPERATION_FLAG_UTIME_OMIT_OK | FUSE_OPERATION_FLAG_DIRECT_IO)
 
 // Data structures
 
@@ -238,13 +270,15 @@ struct fuse_thread_s {
 
   // Operation handlers
   napi_ref handlers[FUSE_OPERATION_COUNT];
+  uint8_t implemented[FUSE_OPERATION_COUNT];
 
   struct fuse *fuse;
-  struct fuse_chan *ch;
   struct fuse_operations ops;
   char *mnt;
   char *mntopts;
   int mounted;
+  int fuse_mounted;
+  uint32_t operation_flags;
   int mount_pending;
   int mount_cleanup_pending;
   int mount_error;
@@ -278,8 +312,7 @@ struct fuse_worker_s {
   fuse_thread_t *fuse;
   fuse_thread_locals_t *locals;
   pthread_t thread;
-  void *buffer;
-  size_t buffer_size;
+  struct fuse_buf buffer;
 };
 
 struct fuse_thread_locals_s {
@@ -295,6 +328,7 @@ struct fuse_thread_locals_s {
   char *linkname;
   struct fuse_file_info *info;
   struct fuse_conn_info *conn;
+  struct fuse_config *config;
   const void *buf;
   void *owned_input;
   off_t offset;
@@ -334,7 +368,7 @@ struct fuse_thread_locals_s {
   struct statvfs *statvfs;
 
   // Readdir
-  fuse_fill_dir_t readdir_filler;
+  fuse_native_fill_dir_t readdir_filler;
 
   // Internal bookkeeping
   fuse_thread_t *fuse;
@@ -560,6 +594,82 @@ static int populate_statvfs (uint32_t *ints, struct statvfs* statvfs) {
   return 0;
 }
 
+#if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
+static void stat_to_darwin_attr (
+  const struct stat *source,
+  struct fuse_darwin_attr *destination
+) {
+  memset(destination, 0, sizeof(*destination));
+  destination->ino = source->st_ino;
+  destination->mode = source->st_mode;
+  destination->nlink = source->st_nlink;
+  destination->uid = source->st_uid;
+  destination->gid = source->st_gid;
+  destination->rdev = source->st_rdev;
+  destination->atimespec = source->st_atimespec;
+  destination->mtimespec = source->st_mtimespec;
+  destination->ctimespec = source->st_ctimespec;
+  destination->btimespec = source->st_birthtimespec;
+  destination->size = source->st_size;
+  destination->blocks = source->st_blocks;
+  destination->blksize = source->st_blksize;
+  destination->flags = source->st_flags;
+}
+
+static int statvfs_to_darwin_statfs (
+  const struct statvfs *source,
+  struct statfs *destination
+) {
+  unsigned long io_size =
+    source->f_frsize == 0 ? source->f_bsize : source->f_frsize;
+  if (source->f_bsize > UINT32_MAX || io_size > INT32_MAX) {
+    return -ERANGE;
+  }
+
+  memset(destination, 0, sizeof(*destination));
+  destination->f_bsize = (uint32_t) source->f_bsize;
+  destination->f_iosize = (int32_t) io_size;
+  destination->f_blocks = (uint64_t) source->f_blocks;
+  destination->f_bfree = (uint64_t) source->f_bfree;
+  destination->f_bavail = (uint64_t) source->f_bavail;
+  destination->f_files = (uint64_t) source->f_files;
+  destination->f_ffree = (uint64_t) source->f_ffree;
+  return 0;
+}
+#endif
+
+static int fuse_native_fill_directory_entry (
+  fuse_native_fill_dir_t filler,
+  void *buffer,
+  const char *name,
+  const struct stat *stat,
+  off_t next_offset
+) {
+#if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
+  struct fuse_darwin_attr darwin_attr = {0};
+  struct fuse_darwin_attr *darwin_attr_ptr = NULL;
+  if (stat != NULL) {
+    stat_to_darwin_attr(stat, &darwin_attr);
+    darwin_attr_ptr = &darwin_attr;
+  }
+  return filler(
+    buffer,
+    name,
+    darwin_attr_ptr,
+    next_offset,
+    (enum fuse_fill_dir_flags) 0
+  );
+#else
+  return filler(
+    buffer,
+    name,
+    stat,
+    next_offset,
+    (enum fuse_fill_dir_flags) 0
+  );
+#endif
+}
+
 static napi_status create_uint64_value (napi_env env, uint64_t value, napi_value *result) {
   if (value <= 9007199254740991ULL) {
     return napi_create_double(env, (double) value, result);
@@ -648,6 +758,17 @@ static int int64_to_off_t (int64_t value, off_t *result) {
   return (int64_t) *result == value ? 0 : -ERANGE;
 }
 
+/*
+ * Darwin and Linux encode UTIME_NOW/UTIME_OMIT differently.  The public
+ * JavaScript constants remain platform-neutral, so normalize at the native
+ * boundary.
+ */
+static uint32_t fuse_native_timespec_nanoseconds (long nanoseconds) {
+  if (nanoseconds == UTIME_NOW) return UINT32_C(0x3fffffff);
+  if (nanoseconds == UTIME_OMIT) return UINT32_C(0x3ffffffe);
+  return (uint32_t) nanoseconds;
+}
+
 // Methods
 
 FUSE_METHOD(statfs, 1, 1, (const char * path, struct statvfs *statvfs), {
@@ -664,6 +785,18 @@ FUSE_METHOD(statfs, 1, 1, (const char * path, struct statvfs *statvfs), {
     res = populate_statvfs(ints, l->statvfs);
   }
 })
+
+#if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
+static int fuse_native_statfs_darwin (
+  const char *path,
+  struct statfs *statfs
+) {
+  struct statvfs portable_stat = {0};
+  int result = fuse_native_statfs(path, &portable_stat);
+  if (result != 0) return result;
+  return statvfs_to_darwin_statfs(&portable_stat, statfs);
+}
+#endif
 
 FUSE_METHOD(getattr, 1, 1, (const char *path, struct stat *stat), {
   l->path = path;
@@ -700,6 +833,51 @@ FUSE_METHOD(fgetattr, 2, 1, (const char *path, struct stat *stat, struct fuse_fi
     res = populate_stat(ints, l->stat);
   }
 })
+
+/*
+ * libfuse 3 merged getattr/fgetattr into one operation.  Preserve both
+ * JavaScript handlers and select the handle-aware variant whenever libfuse
+ * supplies file information.
+ */
+#if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
+static int fuse_native_getattr_v3 (
+  const char *path,
+  struct fuse_darwin_attr *attr,
+  struct fuse_file_info *info
+) {
+  struct stat portable_stat = {0};
+  struct fuse_context *context = fuse_get_context();
+  fuse_thread_t *ft = context == NULL
+    ? NULL
+    : (fuse_thread_t *) context->private_data;
+  int result = -ENOSYS;
+  if (info != NULL && ft != NULL && ft->implemented[op_fgetattr]) {
+    result = fuse_native_fgetattr(path, &portable_stat, info);
+  } else if (ft != NULL && ft->implemented[op_getattr]) {
+    result = fuse_native_getattr(path, &portable_stat);
+  }
+  if (result == 0) stat_to_darwin_attr(&portable_stat, attr);
+  return result;
+}
+#else
+static int fuse_native_getattr_v3 (
+  const char *path,
+  struct stat *stat,
+  struct fuse_file_info *info
+) {
+  struct fuse_context *context = fuse_get_context();
+  fuse_thread_t *ft = context == NULL
+    ? NULL
+    : (fuse_thread_t *) context->private_data;
+  if (info != NULL && ft != NULL && ft->implemented[op_fgetattr]) {
+    return fuse_native_fgetattr(path, stat, info);
+  }
+  if (ft != NULL && ft->implemented[op_getattr]) {
+    return fuse_native_getattr(path, stat);
+  }
+  return -ENOSYS;
+}
+#endif
 
 FUSE_METHOD_VOID(access, 2, 0, (const char *path, int mode), {
   l->path = path;
@@ -775,16 +953,29 @@ FUSE_METHOD(create, 3, 2, (const char *path, mode_t mode, struct fuse_file_info 
   FUSE_APPLY_FILE_INFO_RESULT()
 })
 
-FUSE_METHOD_VOID(utimens, 7, 0, (const char *path, const struct timespec tv[2]), {
+FUSE_METHOD_VOID(utimens, 7, 0, (
+  const char *path,
+  const struct timespec tv[2],
+  struct fuse_file_info *info
+), {
   l->path = path;
   l->atime = tv[0];
   l->mtime = tv[1];
+  l->info = info;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   FUSE_UINT64_TO_INTS_ARGV(l->atime.tv_sec, 3)
-  napi_create_uint32(env, (uint32_t) l->atime.tv_nsec, &(argv[5]));
+  napi_create_uint32(
+    env,
+    fuse_native_timespec_nanoseconds(l->atime.tv_nsec),
+    &(argv[5])
+  );
   FUSE_UINT64_TO_INTS_ARGV(l->mtime.tv_sec, 6)
-  napi_create_uint32(env, (uint32_t) l->mtime.tv_nsec, &(argv[8]));
+  napi_create_uint32(
+    env,
+    fuse_native_timespec_nanoseconds(l->mtime.tv_nsec),
+    &(argv[8])
+  );
 })
 
 FUSE_METHOD_VOID(release, 2, 0, (const char *path, struct fuse_file_info *info), {
@@ -852,7 +1043,15 @@ FUSE_METHOD(write, 6, 0, (const char *path, const char *buf, size_t len, off_t o
   if (res > 0 && (size_t) res > l->len) res = -EIO;
 })
 
-FUSE_METHOD(readdir, 4, 3, (const char *path, void *buf, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *info), {
+FUSE_METHOD(readdir, 4, 3, (
+  const char *path,
+  void *buf,
+  fuse_native_fill_dir_t filler,
+  off_t offset,
+  struct fuse_file_info *info,
+  enum fuse_readdir_flags flags
+), {
+  (void) flags;
   l->buf = buf;
   l->path = path;
   l->offset = offset;
@@ -929,11 +1128,17 @@ FUSE_METHOD(readdir, 4, 3, (const char *path, void *buf, fuse_fill_dir_t filler,
       }
     }
 
-    if (l->readdir_filler((char *) l->buf, name, stat_ptr, next_offset) != 0) break;
+    if (fuse_native_fill_directory_entry(
+          l->readdir_filler,
+          (char *) l->buf,
+          name,
+          stat_ptr,
+          next_offset
+        ) != 0) break;
   }
 })
 
-#ifdef __APPLE__
+#if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
 
 FUSE_METHOD(setxattr, 5, 0, (const char *path, const char *name, const char *value, size_t size, int flags, uint32_t position), {
   l->path = path;
@@ -1104,6 +1309,28 @@ FUSE_METHOD_VOID(ftruncate, 4, 0, (const char *path, off_t size, struct fuse_fil
   FUSE_UINT64_TO_INTS_ARGV(l->offset, 4)
 })
 
+/*
+ * libfuse 3 merged truncate/ftruncate in the same way as getattr.  Route to
+ * the existing JavaScript-facing operation to keep the 1.x handler contract.
+ */
+static int fuse_native_truncate_v3 (
+  const char *path,
+  off_t size,
+  struct fuse_file_info *info
+) {
+  struct fuse_context *context = fuse_get_context();
+  fuse_thread_t *ft = context == NULL
+    ? NULL
+    : (fuse_thread_t *) context->private_data;
+  if (info != NULL && ft != NULL && ft->implemented[op_ftruncate]) {
+    return fuse_native_ftruncate(path, size, info);
+  }
+  if (ft != NULL && ft->implemented[op_truncate]) {
+    return fuse_native_truncate(path, size);
+  }
+  return -ENOSYS;
+}
+
 FUSE_METHOD(readlink, 1, 1, (const char *path, char *linkname, size_t len), {
   l->path = path;
   l->linkname = linkname;
@@ -1123,19 +1350,30 @@ FUSE_METHOD(readlink, 1, 1, (const char *path, char *linkname, size_t len), {
   }
 })
 
-FUSE_METHOD_VOID(chown, 3, 0, (const char *path, uid_t uid, gid_t gid), {
+FUSE_METHOD_VOID(chown, 3, 0, (
+  const char *path,
+  uid_t uid,
+  gid_t gid,
+  struct fuse_file_info *info
+), {
   l->path = path;
   l->uid = uid;
   l->gid = gid;
+  l->info = info;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   napi_create_uint32(env, l->uid, &(argv[3]));
   napi_create_uint32(env, l->gid, &(argv[4]));
 })
 
-FUSE_METHOD_VOID(chmod, 2, 0, (const char *path, mode_t mode), {
+FUSE_METHOD_VOID(chmod, 2, 0, (
+  const char *path,
+  mode_t mode,
+  struct fuse_file_info *info
+), {
   l->path = path;
   l->mode = mode;
+  l->info = info;
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
   napi_create_uint32(env, l->mode, &(argv[3]));
@@ -1157,7 +1395,12 @@ FUSE_METHOD_VOID(unlink, 1, 0, (const char *path), {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
 })
 
-FUSE_METHOD_VOID(rename, 2, 0, (const char *path, const char *dest), {
+FUSE_METHOD_VOID(rename, 2, 0, (
+  const char *path,
+  const char *dest,
+  unsigned int flags
+), {
+  if (flags != 0) return -EOPNOTSUPP;
   l->path = path;
   l->dest = dest;
 }, {
@@ -1194,6 +1437,82 @@ FUSE_METHOD_VOID(rmdir, 1, 0, (const char *path), {
 }, {
   napi_create_string_utf8(env, l->path, NAPI_AUTO_LENGTH, &(argv[2]));
 })
+
+#if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
+/*
+ * macFUSE 3 combines Darwin metadata mutations in setattr.  Execute the
+ * existing portable handlers in a stable order so a 1.x filesystem keeps its
+ * chmod/chown/truncate/utimens behavior without learning a platform-only API.
+ */
+static int fuse_native_setattr_darwin (
+  const char *path,
+  struct fuse_darwin_attr *attr,
+  int to_set,
+  struct fuse_file_info *info
+) {
+  struct fuse_context *context = fuse_get_context();
+  fuse_thread_t *ft = context == NULL
+    ? NULL
+    : (fuse_thread_t *) context->private_data;
+  if (ft == NULL || attr == NULL) return -EIO;
+
+  uint32_t requested = (uint32_t) to_set;
+  uint32_t unsupported =
+    (uint32_t) FUSE_SET_ATTR_BTIME |
+    (uint32_t) FUSE_SET_ATTR_BKUPTIME |
+    (uint32_t) FUSE_SET_ATTR_FLAGS;
+  if ((requested & unsupported) != 0) return -EOPNOTSUPP;
+
+  int result = 0;
+  if ((requested & FUSE_SET_ATTR_MODE) != 0) {
+    if (!ft->implemented[op_chmod]) return -ENOSYS;
+    result = fuse_native_chmod(path, attr->mode, info);
+    if (result != 0) return result;
+  }
+
+  if ((requested & (FUSE_SET_ATTR_UID | FUSE_SET_ATTR_GID)) != 0) {
+    if (!ft->implemented[op_chown]) return -ENOSYS;
+    uid_t uid = (requested & FUSE_SET_ATTR_UID) != 0
+      ? attr->uid
+      : (uid_t) -1;
+    gid_t gid = (requested & FUSE_SET_ATTR_GID) != 0
+      ? attr->gid
+      : (gid_t) -1;
+    result = fuse_native_chown(path, uid, gid, info);
+    if (result != 0) return result;
+  }
+
+  if ((requested & FUSE_SET_ATTR_SIZE) != 0) {
+    result = fuse_native_truncate_v3(path, attr->size, info);
+    if (result != 0) return result;
+  }
+
+  if ((requested & (FUSE_SET_ATTR_ATIME | FUSE_SET_ATTR_MTIME |
+                    FUSE_SET_ATTR_ATIME_NOW |
+                    FUSE_SET_ATTR_MTIME_NOW)) != 0) {
+    if (!ft->implemented[op_utimens]) return -ENOSYS;
+    struct timespec times[3] = {
+      {.tv_sec = 0, .tv_nsec = UTIME_OMIT},
+      {.tv_sec = 0, .tv_nsec = UTIME_OMIT},
+      {.tv_sec = 0, .tv_nsec = UTIME_OMIT}
+    };
+    if ((requested & FUSE_SET_ATTR_ATIME_NOW) != 0) {
+      times[0].tv_nsec = UTIME_NOW;
+    } else if ((requested & FUSE_SET_ATTR_ATIME) != 0) {
+      times[0] = attr->atimespec;
+    }
+    if ((requested & FUSE_SET_ATTR_MTIME_NOW) != 0) {
+      times[1].tv_nsec = UTIME_NOW;
+    } else if ((requested & FUSE_SET_ATTR_MTIME) != 0) {
+      times[1] = attr->mtimespec;
+    }
+    result = fuse_native_utimens(path, times, info);
+    if (result != 0) return result;
+  }
+
+  return 0;
+}
+#endif
 
 static void fuse_native_dispatch_destroy (
   uv_async_t* handle,
@@ -1523,7 +1842,11 @@ static void fuse_native_dispatch_init (uv_async_t* handle, fuse_thread_locals_t*
         napi_create_uint32(env, l->op, &(argv[1])) != napi_ok ||
         napi_create_uint32(env, l->conn->proto_major, &(argv[2])) != napi_ok ||
         napi_create_uint32(env, l->conn->proto_minor, &(argv[3])) != napi_ok ||
-        napi_create_uint32(env, l->conn->async_read, &(argv[4])) != napi_ok ||
+        napi_create_uint32(
+          env,
+          (l->conn->want & FUSE_CAP_ASYNC_READ) != 0,
+          &(argv[4])
+        ) != napi_ok ||
         napi_create_uint32(env, l->conn->max_write, &(argv[5])) != napi_ok ||
         napi_create_uint32(env, l->conn->max_readahead, &(argv[6])) != napi_ok ||
         napi_create_uint32(env, l->conn->capable, &(argv[7])) != napi_ok ||
@@ -1569,12 +1892,20 @@ NAPI_METHOD(fuse_native_signal_init) {
     const uint32_t congestion_threshold = (mask & FUSE_INIT_CONFIG_CONGESTION_THRESHOLD) != 0
       ? config[4]
       : l->conn->congestion_threshold;
-    const uint32_t want = (mask & FUSE_INIT_CONFIG_WANT) != 0
+    uint32_t want = (mask & FUSE_INIT_CONFIG_WANT) != 0
       ? config[5]
       : l->conn->want;
     const uint32_t async_read = (mask & FUSE_INIT_CONFIG_ASYNC_READ) != 0
       ? config[6]
-      : l->conn->async_read;
+      : (l->conn->want & FUSE_CAP_ASYNC_READ) != 0;
+
+    if ((mask & FUSE_INIT_CONFIG_ASYNC_READ) != 0) {
+      if (async_read != 0) {
+        want |= FUSE_CAP_ASYNC_READ;
+      } else {
+        want &= ~((uint32_t) FUSE_CAP_ASYNC_READ);
+      }
+    }
 
     if (((mask & FUSE_INIT_CONFIG_MAX_WRITE) != 0 &&
          (max_write == 0 || max_write > l->conn->max_write)) ||
@@ -1588,7 +1919,7 @@ NAPI_METHOD(fuse_native_signal_init) {
         ((mask & (FUSE_INIT_CONFIG_MAX_BACKGROUND |
                   FUSE_INIT_CONFIG_CONGESTION_THRESHOLD)) != 0 &&
          congestion_threshold > max_background) ||
-        ((mask & FUSE_INIT_CONFIG_WANT) != 0 &&
+        ((mask & (FUSE_INIT_CONFIG_WANT | FUSE_INIT_CONFIG_ASYNC_READ)) != 0 &&
          (want & ~l->conn->capable) != 0) ||
         ((mask & FUSE_INIT_CONFIG_ASYNC_READ) != 0 && async_read > 1U)) {
       res = -EINVAL;
@@ -1599,8 +1930,9 @@ NAPI_METHOD(fuse_native_signal_init) {
       if ((mask & FUSE_INIT_CONFIG_CONGESTION_THRESHOLD) != 0) {
         l->conn->congestion_threshold = congestion_threshold;
       }
-      if ((mask & FUSE_INIT_CONFIG_WANT) != 0) l->conn->want = want;
-      if ((mask & FUSE_INIT_CONFIG_ASYNC_READ) != 0) l->conn->async_read = async_read;
+      if ((mask & (FUSE_INIT_CONFIG_WANT | FUSE_INIT_CONFIG_ASYNC_READ)) != 0) {
+        l->conn->want = want;
+      }
     }
   }
 
@@ -1608,14 +1940,36 @@ NAPI_METHOD(fuse_native_signal_init) {
   return NULL;
 }
 
-static void * fuse_native_init (struct fuse_conn_info *conn) {
+static void * fuse_native_init (
+  struct fuse_conn_info *conn,
+  struct fuse_config *config
+) {
   fuse_thread_locals_t *l = get_thread_locals();
-  fuse_thread_t *ft = (fuse_thread_t *) fuse_get_context()->private_data;
-  if (l == NULL) return ft;
+  struct fuse_context *context = fuse_get_context();
+  fuse_thread_t *ft = context == NULL
+    ? NULL
+    : (fuse_thread_t *) context->private_data;
+  if (ft == NULL) return NULL;
+
+  /*
+   * FUSE 3 moved the old operation-level null-path flags into fuse_config.
+   * Either legacy flag means the JavaScript implementation accepts a NULL
+   * path for handle-based operations.
+   */
+  if (config != NULL) {
+    config->nullpath_ok =
+      (ft->operation_flags &
+       (FUSE_OPERATION_FLAG_NULL_PATH_OK | FUSE_OPERATION_FLAG_NO_PATH)) != 0;
+    config->direct_io =
+      (ft->operation_flags & FUSE_OPERATION_FLAG_DIRECT_IO) != 0;
+  }
+
+  if (!ft->implemented[op_init] || l == NULL) return ft;
 
   l->op = op_init;
   l->op_fn = fuse_native_dispatch_init;
   l->conn = conn;
+  l->config = config;
   l->info = NULL;
   fuse_native_capture_context(l);
 
@@ -1626,6 +1980,7 @@ static void * fuse_native_init (struct fuse_conn_info *conn) {
   }
   uv_sem_wait(&(l->sem));
   l->conn = NULL;
+  l->config = NULL;
 
   return ft;
 }
@@ -1735,11 +2090,19 @@ static void fuse_native_worker_finished (void *data) {
   uv_sem_post(&(worker->fuse->workers_finished));
 }
 
+static void fuse_native_release_worker_buffer (fuse_worker_t *worker) {
+#ifdef __APPLE__
+  fuse_buf_free(&(worker->buffer));
+#else
+  free(worker->buffer.mem);
+#endif
+  memset(&(worker->buffer), 0, sizeof(worker->buffer));
+}
+
 static void* fuse_native_worker (void *data) {
   fuse_worker_t *worker = (fuse_worker_t *) data;
   fuse_thread_t *ft = worker->fuse;
   struct fuse_session *session = fuse_get_session(ft->fuse);
-  struct fuse_chan *ch = ft->ch;
 
   (void) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
   pthread_cleanup_push(fuse_native_worker_finished, worker);
@@ -1752,13 +2115,8 @@ static void* fuse_native_worker (void *data) {
     fuse_session_exit(session);
   } else {
     while (!fuse_session_exited(session)) {
-      struct fuse_buf buffer = {
-        .size = worker->buffer_size,
-        .mem = worker->buffer
-      };
-
       (void) pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
-      int result = fuse_session_receive_buf(session, &buffer, &ch);
+      int result = fuse_session_receive_buf(session, &(worker->buffer));
       (void) pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
       if (result == -EINTR) continue;
       if (result <= 0) {
@@ -1768,7 +2126,7 @@ static void* fuse_native_worker (void *data) {
         }
         break;
       }
-      fuse_session_process_buf(session, &buffer, ch);
+      fuse_session_process_buf(session, &(worker->buffer));
     }
   }
   pthread_cleanup_pop(1);
@@ -1782,28 +2140,20 @@ static void fuse_native_cancel_workers_locked (fuse_thread_t *ft) {
 }
 
 static void fuse_native_dispose_mount (
-  const char *mnt,
   struct fuse *fuse,
-  struct fuse_chan *ch
+  int mounted
 ) {
-  /*
-   * FUSE 2 fuse_unmount() clears the channel fd, unmounts the kernel
-   * filesystem, removes the channel from its session, and destroys the
-   * channel. Never pass ch to fuse_session_remove_chan() afterwards: ch no
-   * longer exists. fuse_destroy() can then destroy the channel-free session.
-   */
-  if (ch != NULL) fuse_unmount(mnt, ch);
+  if (mounted && fuse != NULL) fuse_unmount(fuse);
   if (fuse != NULL) fuse_destroy(fuse);
 }
 
 static void* start_fuse_thread (void *data) {
   fuse_thread_t *ft = (fuse_thread_t *) data;
   struct fuse_session *session = fuse_get_session(ft->fuse);
-  size_t buffer_size = fuse_chan_bufsize(ft->ch);
   fuse_worker_t *workers = calloc(ft->max_workers, sizeof(*workers));
   size_t workers_to_join = 0;
 
-  if (session == NULL || buffer_size == 0) {
+  if (session == NULL) {
     fuse_native_record_loop_error(ft, -EIO);
   } else if (workers == NULL) {
     fuse_native_record_loop_error(ft, -ENOMEM);
@@ -1822,12 +2172,6 @@ static void* start_fuse_thread (void *data) {
       }
       workers[i].fuse = ft;
       workers[i].locals = locals;
-      workers[i].buffer_size = buffer_size;
-      workers[i].buffer = malloc(buffer_size);
-      if (workers[i].buffer == NULL) {
-        fuse_native_record_loop_error(ft, -ENOMEM);
-        break;
-      }
 
       int result = pthread_create(
         &(workers[i].thread),
@@ -1836,8 +2180,6 @@ static void* start_fuse_thread (void *data) {
         &(workers[i])
       );
       if (result != 0) {
-        free(workers[i].buffer);
-        workers[i].buffer = NULL;
         fuse_native_record_loop_error(ft, -result);
         break;
       }
@@ -1873,21 +2215,20 @@ static void* start_fuse_thread (void *data) {
     for (size_t i = 0; i < workers_to_join; i++) {
       int result = pthread_join(workers[i].thread, NULL);
       if (result != 0) fuse_native_record_loop_error(ft, -result);
-      free(workers[i].buffer);
-      workers[i].buffer = NULL;
+      fuse_native_release_worker_buffer(&(workers[i]));
     }
     fuse_session_reset(session);
   }
 
   uv_mutex_lock(&(ft->mut));
   struct fuse *fuse = ft->fuse;
-  struct fuse_chan *ch = ft->ch;
+  int mounted = ft->fuse_mounted;
   ft->fuse = NULL;
-  ft->ch = NULL;
+  ft->fuse_mounted = 0;
   uv_mutex_unlock(&(ft->mut));
   free(workers);
 
-  fuse_native_dispose_mount(ft->mnt, fuse, ch);
+  fuse_native_dispose_mount(fuse, mounted);
 
   if (!atomic_load(&(ft->cleanup_requested))) {
     int result = uv_async_send(&(ft->loop_exit_async));
@@ -1984,10 +2325,10 @@ static void fuse_native_loop_exit_dispatch (uv_async_t *handle) {
 
 static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
   ft->mount_cleanup_pending = 1;
-  if (ft->fuse != NULL || ft->ch != NULL) {
-    fuse_native_dispose_mount(ft->mnt, ft->fuse, ft->ch);
+  if (ft->fuse != NULL) {
+    fuse_native_dispose_mount(ft->fuse, ft->fuse_mounted);
     ft->fuse = NULL;
-    ft->ch = NULL;
+    ft->fuse_mounted = 0;
   }
 
   /*
@@ -2357,9 +2698,9 @@ static void fuse_native_mount_work (uv_work_t *request) {
   };
   struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 
-  ft->ch = fuse_mount(ft->mnt, &args);
-  if (ft->ch == NULL) {
-    ft->mount_error = FUSE_MOUNT_ERROR_MOUNT;
+  ft->fuse = fuse_new(&args, &(ft->ops), sizeof(ft->ops), ft);
+  if (ft->fuse == NULL) {
+    ft->mount_error = FUSE_MOUNT_ERROR_INIT;
     fuse_opt_free_args(&args);
     return;
   }
@@ -2369,12 +2710,12 @@ static void fuse_native_mount_work (uv_work_t *request) {
     return;
   }
 
-  ft->fuse = fuse_new(ft->ch, &args, &(ft->ops), sizeof(ft->ops), ft);
   fuse_opt_free_args(&args);
-  if (ft->fuse == NULL) {
-    ft->mount_error = FUSE_MOUNT_ERROR_INIT;
+  if (fuse_mount(ft->fuse, ft->mnt) != 0) {
+    ft->mount_error = FUSE_MOUNT_ERROR_MOUNT;
     return;
   }
+  ft->fuse_mounted = 1;
   if (atomic_load(&(ft->mount_cancelled))) {
     ft->mount_error = FUSE_MOUNT_ERROR_CANCELLED;
   }
@@ -2548,6 +2889,7 @@ NAPI_METHOD(fuse_native_mount) {
   }
 
   for (uint32_t i = 0; i < handlers_length; i++) {
+    ft->implemented[i] = implemented[i] != 0;
     napi_value handler;
     napi_valuetype type;
     if (napi_get_element(env, handlers, i, &handler) != napi_ok ||
@@ -2571,10 +2913,12 @@ NAPI_METHOD(fuse_native_mount) {
 
   memset(&(ft->ops), 0, sizeof(ft->ops));
   if (implemented[op_access]) ft->ops.access = fuse_native_access;
-  if (implemented[op_truncate]) ft->ops.truncate = fuse_native_truncate;
-  if (implemented[op_ftruncate]) ft->ops.ftruncate = fuse_native_ftruncate;
-  if (implemented[op_getattr]) ft->ops.getattr = fuse_native_getattr;
-  if (implemented[op_fgetattr]) ft->ops.fgetattr = fuse_native_fgetattr;
+  if (implemented[op_truncate] || implemented[op_ftruncate]) {
+    ft->ops.truncate = fuse_native_truncate_v3;
+  }
+  if (implemented[op_getattr] || implemented[op_fgetattr]) {
+    ft->ops.getattr = fuse_native_getattr_v3;
+  }
   if (implemented[op_flush]) ft->ops.flush = fuse_native_flush;
   if (implemented[op_fsync]) ft->ops.fsync = fuse_native_fsync;
   if (implemented[op_fsyncdir]) ft->ops.fsyncdir = fuse_native_fsyncdir;
@@ -2587,7 +2931,16 @@ NAPI_METHOD(fuse_native_mount) {
   if (implemented[op_getxattr]) ft->ops.getxattr = fuse_native_getxattr;
   if (implemented[op_listxattr]) ft->ops.listxattr = fuse_native_listxattr;
   if (implemented[op_removexattr]) ft->ops.removexattr = fuse_native_removexattr;
+#if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
+  if (implemented[op_statfs]) ft->ops.statfs = fuse_native_statfs_darwin;
+  if (implemented[op_chmod] || implemented[op_chown] ||
+      implemented[op_truncate] || implemented[op_ftruncate] ||
+      implemented[op_utimens]) {
+    ft->ops.setattr = fuse_native_setattr_darwin;
+  }
+#else
   if (implemented[op_statfs]) ft->ops.statfs = fuse_native_statfs;
+#endif
   if (implemented[op_open]) ft->ops.open = fuse_native_open;
   if (implemented[op_opendir]) ft->ops.opendir = fuse_native_opendir;
   if (implemented[op_read]) ft->ops.read = fuse_native_read;
@@ -2602,7 +2955,11 @@ NAPI_METHOD(fuse_native_mount) {
   if (implemented[op_symlink]) ft->ops.symlink = fuse_native_symlink;
   if (implemented[op_mkdir]) ft->ops.mkdir = fuse_native_mkdir;
   if (implemented[op_rmdir]) ft->ops.rmdir = fuse_native_rmdir;
-  if (implemented[op_init]) ft->ops.init = fuse_native_init;
+  /*
+   * Always install init so the legacy null-path options can be translated to
+   * fuse_config even when no JavaScript init handler is present.
+   */
+  ft->ops.init = fuse_native_init;
   if (implemented[op_destroy]) ft->ops.destroy = fuse_native_destroy;
   if (implemented[op_lock]) ft->ops.lock = fuse_native_lock;
   if (implemented[op_bmap]) ft->ops.bmap = fuse_native_bmap;
@@ -2612,12 +2969,7 @@ NAPI_METHOD(fuse_native_mount) {
   if (implemented[op_read_buf]) ft->ops.read_buf = fuse_native_read_buf;
   if (implemented[op_flock]) ft->ops.flock = fuse_native_flock;
   if (implemented[op_fallocate]) ft->ops.fallocate = fuse_native_fallocate;
-  ft->ops.flag_nullpath_ok =
-    (operation_flags & FUSE_OPERATION_FLAG_NULL_PATH_OK) != 0;
-  ft->ops.flag_nopath =
-    (operation_flags & FUSE_OPERATION_FLAG_NO_PATH) != 0;
-  ft->ops.flag_utime_omit_ok =
-    (operation_flags & FUSE_OPERATION_FLAG_UTIME_OMIT_OK) != 0;
+  ft->operation_flags = operation_flags;
 
   int err = uv_mutex_init(&(ft->mut));
   if (err < 0) goto mount_failed;

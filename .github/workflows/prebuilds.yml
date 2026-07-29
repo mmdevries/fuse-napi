@@ -19,7 +19,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           package-manager-cache: false
 
       - name: Verify package, lockfile, README, and release tag
@@ -43,13 +43,13 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           package-manager-cache: false
 
-      - name: Install FUSE 2 build dependency
+      - name: Install FUSE 3 build dependency
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libfuse-dev pkg-config
+          sudo apt-get install --yes libfuse3-dev fuse3 pkg-config
 
       - name: Install exact dependencies
         run: npm ci
@@ -94,7 +94,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           package-manager-cache: false
 
       - name: Build Linux Node-API prebuild on the glibc 2.31 baseline
@@ -103,10 +103,10 @@ jobs:
           docker run --rm \
             --volume "$PWD:/workspace" \
             --workdir /workspace \
-            node:20-bullseye \
+            node:22-bullseye \
             bash -euxo pipefail -c '
               apt-get update
-              apt-get install --yes libfuse-dev pkg-config
+              apt-get install --yes libfuse3-dev fuse3 pkg-config
               npm ci --ignore-scripts
               npm run prebuild
               node -e "require(\"node-gyp-build\")(\".\")"
@@ -140,7 +140,7 @@ jobs:
         env:
           PREBUILD: prebuilds/${{ matrix.platform }}-${{ matrix.arch }}/fuse-napi.node
         run: |
-          ldd "$PREBUILD" | grep 'libfuse.so.2'
+          ldd "$PREBUILD" | grep 'libfuse3.so.3'
           newest_glibc="$(
             objdump -T "$PREBUILD" |
               grep -o 'GLIBC_[0-9.]*' |
@@ -159,7 +159,7 @@ jobs:
         env:
           PREBUILD: prebuilds/${{ matrix.platform }}-${{ matrix.arch }}/fuse-napi.node
         run: |
-          otool -L "$PREBUILD" | grep '/usr/local/lib/libfuse.2.dylib'
+          otool -L "$PREBUILD" | grep '/usr/local/lib/libfuse3'
           xcrun vtool -show-build "$PREBUILD" | grep 'minos 12.0'
 
       - name: Upload prebuild
@@ -182,19 +182,19 @@ jobs:
           - runner: ubuntu-24.04
             platform: linux
             arch: x64
-            node-version: 20
+            node-version: 26
           - runner: ubuntu-24.04-arm
             platform: linux
             arch: arm64
-            node-version: 20
+            node-version: 26
           - runner: macos-15-intel
             platform: darwin
             arch: x64
-            node-version: 20
+            node-version: 26
           - runner: macos-15
             platform: darwin
             arch: arm64
-            node-version: 20
+            node-version: 26
           - runner: ubuntu-24.04
             platform: linux
             arch: x64
@@ -242,7 +242,7 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libfuse2
+          sudo apt-get install --yes libfuse3-3 fuse3
 
       - name: Install macFUSE runtime dependency
         if: matrix.platform == 'darwin'
@@ -279,7 +279,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           package-manager-cache: false
 
       - name: Install JavaScript dependencies
@@ -349,14 +349,14 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           package-manager-cache: false
 
       - name: Install Linux runtime dependency
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes fuse libfuse2
+          sudo apt-get install --yes fuse3 libfuse3-3
 
       - name: Enable Linux FUSE device
         if: matrix.platform == 'linux'

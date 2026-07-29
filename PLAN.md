@@ -1,9 +1,10 @@
-# fuse-napi implementation plan (historical)
+# fuse-napi 1.x implementation plan (historical)
 
 > This file preserves the original implementation record and baseline
 > observations. It is not the current release status or support contract.
-> See `README.md`, `COMPATIBILITY.md`, `CHANGELOG.md`, and `RELEASING.md` for
-> maintained production information.
+> The 2.x FUSE 3 implementation supersedes it. See `README.md`,
+> `COMPATIBILITY.md`, `CHANGELOG.md`, and `RELEASING.md` for maintained
+> production information.
 
 ## Status
 

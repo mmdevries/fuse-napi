@@ -6,7 +6,7 @@ const createMountpoint = require('./fixtures/mnt')
 const stat = require('./fixtures/stat')
 const { unmount } = require('./helpers')
 
-tape('initWithConfig exposes and applies portable FUSE 2 connection limits', function (t) {
+tape('initWithConfig exposes and applies portable FUSE 3 connection limits', function (t) {
   const mnt = createMountpoint()
   let connection
   const fuse = new Fuse(mnt, {

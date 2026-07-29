@@ -28,6 +28,7 @@ const UTIME_OMIT = 0x3ffffffe
 const OPERATION_FLAG_NULL_PATH_OK = 1
 const OPERATION_FLAG_NO_PATH = 2
 const OPERATION_FLAG_UTIME_OMIT_OK = 4
+const OPERATION_FLAG_DIRECT_IO = 8
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER)
 const XATTR_NOT_FOUND = -(os.constants.errno.ENOATTR || os.constants.errno.ENODATA || 61)
 const EMPTY_INIT_CONFIG = new Uint32Array(7)
@@ -241,7 +242,7 @@ class Fuse extends Nanoresource {
     validateOptions(opts)
     validateOperations(ops)
     if (ops.error !== undefined) {
-      throw new TypeError('Operation "error" is not a FUSE 2 operation and is not supported')
+      throw new TypeError('Operation "error" is not a supported FUSE operation')
     }
 
     for (const [name] of OpcodesAndDefaults) {
@@ -283,7 +284,8 @@ class Fuse extends Nanoresource {
     this._operationFlags =
       (this.opts.nullPathOk ? OPERATION_FLAG_NULL_PATH_OK : 0) |
       (this.opts.noPath ? OPERATION_FLAG_NO_PATH : 0) |
-      (this.ops.utimensWithTimespec ? OPERATION_FLAG_UTIME_OMIT_OK : 0)
+      (this.ops.utimensWithTimespec ? OPERATION_FLAG_UTIME_OMIT_OK : 0) |
+      (this.opts.directIo ? OPERATION_FLAG_DIRECT_IO : 0)
 
     this._force = !!this.opts.force
     this._mkdir = !!this.opts.mkdir
@@ -338,7 +340,6 @@ class Fuse extends Nanoresource {
     if (this.opts.subtype) options.push('subtype=' + mountString('subtype', this.opts.subtype))
     if (this.opts.kernelCache) options.push('kernel_cache')
     if (this.opts.autoCache) options.push('auto_cache')
-    if (this.opts.directIo) options.push('direct_io')
     if (hasValue('umask')) options.push('umask=' + mountInteger('umask', this.opts.umask))
     if (hasValue('uid')) options.push('uid=' + mountInteger('uid', this.opts.uid))
     if (hasValue('gid')) options.push('gid=' + mountInteger('gid', this.opts.gid))
@@ -346,7 +347,6 @@ class Fuse extends Nanoresource {
     if (hasValue('attrTimeout')) options.push('attr_timeout=' + mountNumber('attrTimeout', this.opts.attrTimeout))
     if (hasValue('acAttrTimeout')) options.push('ac_attr_timeout=' + mountNumber('acAttrTimeout', this.opts.acAttrTimeout))
     if (this.opts.noforget) options.push('noforget')
-    if (this.opts.nonEmpty) options.push('nonempty')
     if (hasValue('remember')) options.push('remember=' + mountInteger('remember', this.opts.remember))
     if (this.opts.modules) options.push('modules=' + mountString('modules', this.opts.modules))
 
@@ -450,7 +450,7 @@ class Fuse extends Nanoresource {
       return process.nextTick(cb, new TypeError('Mountpoint must be a non-empty, NUL-free string'))
     }
 
-    const command = IS_OSX ? 'diskutil' : 'fusermount'
+    const command = IS_OSX ? 'diskutil' : 'fusermount3'
     const args = IS_OSX ? ['unmount', 'force', mnt] : ['-uz', mnt]
     execFile(command, args, {
       shell: false,
@@ -712,7 +712,7 @@ class Fuse extends Nanoresource {
     cancelPending()
 
     /*
-     * The native teardown owns the complete FUSE 2 lifecycle: stop and join
+     * The native teardown owns the complete FUSE 3 lifecycle: stop and join
      * the request loop, call fuse_unmount() once, then call fuse_destroy().
      * Linux must not run a second fusermount helper before that lifecycle.
      * macFUSE, however, requires a force-detach to wake its blocking receive
@@ -1633,7 +1633,7 @@ function validateOperations (ops) {
   for (const name of Reflect.ownKeys(ops)) {
     if (typeof name !== 'string' || !KNOWN_OPERATIONS.has(name)) {
       if (name === 'error') continue
-      throw new TypeError(`Unknown FUSE 2 operation ${String(name)}`)
+      throw new TypeError(`Unknown FUSE operation ${String(name)}`)
     }
   }
 }

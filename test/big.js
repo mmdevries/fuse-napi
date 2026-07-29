@@ -56,7 +56,16 @@ tape('read and write big file', function (t) {
     }
   }
 
-  const fuse = new Fuse(mnt, ops, { debug: !true, autoCache: true })
+  /*
+   * Direct I/O guarantees that every sparse 64-bit read reaches the binding
+   * instead of being satisfied by the kernel cache after the preceding
+   * writes.  That makes this a deterministic codec regression test on FUSE 3.
+   */
+  const fuse = new Fuse(mnt, ops, {
+    debug: false,
+    autoCache: true,
+    directIo: true
+  })
   let fd = 0
 
   run(
