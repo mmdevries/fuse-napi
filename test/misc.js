@@ -1,5 +1,6 @@
 const os = require('os')
 const fs = require('fs')
+const path = require('path')
 const tape = require('tape')
 const { spawnSync, exec } = require('child_process')
 
@@ -105,14 +106,17 @@ tape('mounting twice with force fail if mountpoint is not broken', function (t) 
 })
 
 tape('mounting over a broken mountpoint with force succeeds', function (t) {
-  createBrokenMountpoint(mnt)
+  createBrokenMountpoint(mnt, function (err) {
+    t.error(err, 'broken mountpoint is observable')
+    if (err) return t.end()
 
-  const fuse = new Fuse(mnt, {}, { force: true, debug: false })
-  fuse.mount(function (err) {
-    t.error(err, 'no error')
-    t.pass('works')
-    unmount(fuse, function (err) {
-      t.end()
+    const fuse = new Fuse(mnt, {}, { force: true, debug: false })
+    fuse.mount(function (err) {
+      t.error(err, 'no error')
+      t.pass('works')
+      unmount(fuse, function () {
+        t.end()
+      })
     })
   })
 })
@@ -193,8 +197,8 @@ tape('static unmounting', function (t) {
   t.end()
 })
 
-function createBrokenMountpoint (mnt) {
-  spawnSync(process.execPath, ['-e', `
+function createBrokenMountpoint (mnt, cb) {
+  const child = spawnSync(process.execPath, ['-e', `
     const Fuse = require('..')
     const mnt = ${JSON.stringify(mnt)}
     const fuse = new Fuse(mnt, {}, { force: true, debug: false })
@@ -205,4 +209,59 @@ function createBrokenMountpoint (mnt) {
     cwd: __dirname,
     stdio: 'inherit'
   })
+
+  if (child.error) return process.nextTick(cb, child.error)
+  if (child.status !== 0) {
+    const err = new Error(`Broken-mount fixture exited with status ${child.status}`)
+    err.code = 'EFUSETESTFIXTURE'
+    return process.nextTick(cb, err)
+  }
+
+  waitForDisconnectedMount(mnt, cb)
+}
+
+function waitForDisconnectedMount (mnt, cb) {
+  const deadline = Date.now() + 5000
+  const sentinel = path.join(mnt, 'test')
+  const parent = path.join(mnt, '..')
+
+  probe()
+
+  function probe () {
+    fs.stat(sentinel, function (probeErr) {
+      if (isDisconnected(probeErr)) return cb(null)
+
+      fs.stat(mnt, function (mountErr, mountStat) {
+        if (isDisconnected(mountErr)) return cb(null)
+        if (mountErr) return retry(mountErr)
+
+        fs.stat(parent, function (parentErr, parentStat) {
+          if (parentErr) return retry(parentErr)
+          // Some kernels remove the dead mount before exposing ENOTCONN.
+          if (mountStat.dev === parentStat.dev) return cb(null)
+          return retry(probeErr)
+        })
+      })
+    })
+  }
+
+  function retry (cause) {
+    if (Date.now() < deadline) return setTimeout(probe, 10)
+
+    const err = new Error('Timed out waiting for the crashed FUSE mount to disconnect')
+    err.code = 'ETIMEDOUT'
+    if (cause) err.cause = cause
+    Fuse.unmount(mnt, function () {
+      cb(err)
+    })
+  }
+}
+
+function isDisconnected (err) {
+  return !!err && (
+    err.code === 'ENOTCONN' ||
+    err.code === 'ENXIO' ||
+    err.errno === Fuse.ENOTCONN ||
+    err.errno === Fuse.ENXIO
+  )
 }
