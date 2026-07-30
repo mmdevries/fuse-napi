@@ -235,8 +235,16 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
         run: |
           asan_runtime="$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
-          export LD_PRELOAD="$asan_runtime"
-          npm test
+          test -f "$asan_runtime"
+          test "$(sudo -n id -u)" = 0
+          # A deliberately crashed FUSE daemon requires CAP_SYS_ADMIN for
+          # deterministic cleanup. Set LD_PRELOAD only after the sudo boundary.
+          sudo -n env \
+            "ASAN_OPTIONS=$ASAN_OPTIONS" \
+            "UBSAN_OPTIONS=$UBSAN_OPTIONS" \
+            "LD_PRELOAD=$asan_runtime" \
+            "PATH=$PATH" \
+            npm test
 
       - name: Exercise repeated mount, concurrency, and cleanup cycles
         env:
@@ -246,5 +254,14 @@ jobs:
           FUSE_NAPI_SOAK_RSS_LIMIT_MB: 192
         run: |
           asan_runtime="$(clang -print-file-name=libclang_rt.asan-x86_64.so)"
-          export LD_PRELOAD="$asan_runtime"
-          npm run test:soak
+          test -f "$asan_runtime"
+          test "$(sudo -n id -u)" = 0
+          # Keep the soak focused on native memory safety, not helper privilege.
+          sudo -n env \
+            "ASAN_OPTIONS=$ASAN_OPTIONS" \
+            "UBSAN_OPTIONS=$UBSAN_OPTIONS" \
+            "FUSE_NAPI_SOAK_ITERATIONS=$FUSE_NAPI_SOAK_ITERATIONS" \
+            "FUSE_NAPI_SOAK_RSS_LIMIT_MB=$FUSE_NAPI_SOAK_RSS_LIMIT_MB" \
+            "LD_PRELOAD=$asan_runtime" \
+            "PATH=$PATH" \
+            npm run test:soak

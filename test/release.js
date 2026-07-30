@@ -90,6 +90,20 @@ tape('release artifacts retain manually initiated production gates', function (t
   t.match(ciWorkflow, /runtime\.hasStatx/, 'CI verifies native statx support')
   t.match(ciWorkflow, /scan-build --status-bugs/, 'CI runs a native static analyzer')
   t.match(ciWorkflow, /-fsanitize=address,undefined/, 'CI runs ASan and UBSan')
+  t.equal(
+    (ciWorkflow.match(/test "\$\(sudo -n id -u\)" = 0/g) || []).length,
+    2,
+    'mounted sanitizer gates require an explicit non-interactive root boundary'
+  )
+  t.equal(
+    (ciWorkflow.match(/sudo -n env \\\n/g) || []).length,
+    2,
+    'mounted sanitizer gates preserve their explicit environment behind sudo'
+  )
+  t.notOk(
+    /export LD_PRELOAD/.test(ciWorkflow),
+    'the sanitizer runtime is not leaked into unprivileged system helpers'
+  )
   t.match(ciWorkflow, /npm run test:fuzz/, 'CI runs deterministic boundary fuzzing')
   t.match(ciWorkflow, /npm run test:soak/, 'CI runs repeated mount and teardown cycles')
   t.match(ciWorkflow, /FUSE_NAPI_SOAK_RSS_LIMIT_MB: 192/, 'sanitizer RSS remains bounded')

@@ -18,7 +18,10 @@ All notable changes to this project are documented here. Releases follow
   integration, repeated-mount soak coverage, and a libfuse 3.18 modern-syscall
   CI gate. The crashed-mount recovery fixture tolerates an incidental
   kernel-side auto-detach only by creating a new broken mount, so it still
-  proves the real disconnected-mount path without becoming flaky.
+  proves the real disconnected-mount path without becoming flaky. Mounted
+  sanitizer and soak gates receive an explicit root capability boundary while
+  the normal Linux matrix retains complete unprivileged integration coverage,
+  preventing hosted-runner `EPERM` failures from masking sanitizer results.
 
 ### Changed
 

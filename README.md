@@ -99,7 +99,11 @@ and pull requests never trigger it. The manually started release workflow can
 reuse the same matrix through `workflow_call`. In addition to the
 platform/Node.js matrix, it builds against libfuse 3.18, exercises modern
 syscalls, runs static analysis, deterministic fuzzing, ASan/UBSan, and a mount
-soak test.
+soak test. The normal Linux matrix exercises the complete public API as the
+unprivileged runner user. The mounted sanitizer and soak gates run behind an
+explicit non-interactive root boundary so crash-recovery unmounts have
+deterministic `CAP_SYS_ADMIN`; sanitizer and soak configuration is forwarded
+explicitly across that boundary.
 
 The test suite is green on Linux arm64 with libfuse 3.10.3 and on Apple Silicon
 with macFUSE 5.3.3. Hosted CI is configured to build both macOS architectures
