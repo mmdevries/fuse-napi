@@ -5,6 +5,19 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
+## 2.2.1 - 2026-07-30
+
+### Fixed
+
+- Readlink now uses the complete caller-provided buffer capacity, preserving a
+  symlink target of exactly `size - 1` bytes instead of dropping its final byte.
+  The mounted integration suite covers this exact-capacity boundary.
+
+### Removed
+
+- Removed the unused `semaphore.h` compatibility shim; the native addon uses
+  libuv semaphores exclusively and the header was never part of the package.
+
 ## 2.2.0 - 2026-07-30
 
 ### Added
