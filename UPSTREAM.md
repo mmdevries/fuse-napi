@@ -30,6 +30,7 @@ container from:
 - Meson 1.7.2 wheel SHA-256:
   `82c6818dc81743c96de3a458f06175776ebfde4081195ea31ea6971838f25e38`
 
-The release workflow verifies both downloaded hashes, the reported libfuse
-version, shared-library linkage, target architecture, and maximum glibc
-symbol version before packaging.
+Musl prebuilds are linked against Alpine 3.23's distribution
+`libfuse3.so.4` runtime. The release workflow verifies both downloaded hashes,
+the reported libfuse version, shared-library linkage, target architecture,
+musl tagging, and maximum glibc symbol version before packaging.

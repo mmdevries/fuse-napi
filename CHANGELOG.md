@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
+## 2.2.0 - 2026-07-30
+
+### Added
+
+- Alpine Linux 3.23 release prebuilds for Node.js 22, 24, and 26 on x64 and
+  arm64. Musl artifacts use explicit `.musl.node` filenames and the SONAME 4
+  loader selects them automatically in Alpine containers.
+
 ## 2.1.1 - 2026-07-30
 
 ### Fixed

@@ -328,6 +328,89 @@ jobs:
           path: prebuilds/
           if-no-files-found: error
 
+  build-musl-linux:
+    name: Build Alpine musl ${{ matrix.arch }} / Node.js ${{ matrix.node-version }}
+    needs:
+      - validate
+      - ci
+      - quality
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 22
+            abi: 127
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 22
+            abi: 127
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 24
+            abi: 137
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 24
+            abi: 137
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 26
+            abi: 147
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 26
+            abi: 147
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build ABI-specific musl prebuild on Alpine 3.23
+        run: |
+          docker run --rm \
+            --volume "$PWD:/workspace" \
+            --workdir /workspace \
+            node:${{ matrix.node-version }}-alpine3.23 \
+            sh -eux -c '
+              apk add --no-cache \
+                build-base fuse3 fuse3-dev linux-headers pkgconf python3
+              test "$(pkg-config --modversion fuse3)" = 3.17.3
+              npm ci --ignore-scripts
+              npm run prebuild -- \
+                --target ${{ matrix.node-version }}.0.0 \
+                --tag-libc
+              mv \
+                prebuilds/linux-${{ matrix.arch }} \
+                prebuilds/linux-${{ matrix.arch }}-fuse4
+              rm -rf build
+              PREBUILDS_ONLY=1 node -e "
+                const binding = require(\"./lib/native-binding\")
+                  .loadNativeBinding(process.cwd())
+                const runtime = binding.fuse_native_runtime_info()
+                if (runtime.version !== \"3.17.3\") process.exit(1)
+              "
+            '
+
+      - name: Verify musl prebuild and SONAME
+        env:
+          PREBUILD: prebuilds/linux-${{ matrix.arch }}-fuse4/fuse-napi.abi${{ matrix.abi }}.musl.node
+        run: |
+          test -f "$PREBUILD"
+          file "$PREBUILD"
+          readelf -d "$PREBUILD" | grep 'libfuse3.so.4'
+
+      - name: Upload musl prebuild
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prebuild-linux-${{ matrix.arch }}-fuse4-musl-node${{ matrix.node-version }}
+          path: prebuilds/
+          if-no-files-found: error
+
   smoke:
     name: Load ${{ matrix.platform }}-${{ matrix.arch }} / Node.js ${{ matrix.node-version }}
     needs: build
@@ -428,6 +511,7 @@ jobs:
     needs:
       - build
       - build-modern-linux
+      - build-musl-linux
       - smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -468,6 +552,9 @@ jobs:
             test -f "prebuilds/$target/fuse-napi.abi127.node"
             test -f "prebuilds/$target/fuse-napi.abi137.node"
             test -f "prebuilds/$target/fuse-napi.abi147.node"
+            test -f "prebuilds/$target/fuse-napi.abi127.musl.node"
+            test -f "prebuilds/$target/fuse-napi.abi137.musl.node"
+            test -f "prebuilds/$target/fuse-napi.abi147.musl.node"
           done
           npm run verify:release
 
@@ -484,6 +571,8 @@ jobs:
             for abi in 127 137 147; do
               tar -tzf fuse-napi-*.tgz |
                 grep "prebuilds/$target/fuse-napi.abi$abi.node"
+              tar -tzf fuse-napi-*.tgz |
+                grep "prebuilds/$target/fuse-napi.abi$abi.musl.node"
             done
           done
           npm sbom --omit=dev --sbom-format cyclonedx > fuse-napi-sbom.cdx.json
@@ -680,3 +769,70 @@ jobs:
           ldd "$package_root/prebuilds/linux-x64-fuse4/fuse-napi.abi127.node" |
             grep 'libfuse3.so.4'
           node ../scripts/modern-operations-smoke.js "$package_root"
+
+  musl-package-smoke:
+    name: Load exact npm tarball on Alpine ${{ matrix.arch }} / Node.js ${{ matrix.node-version }}
+    needs: package
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 22
+            abi: 127
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 22
+            abi: 127
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 24
+            abi: 137
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 24
+            abi: 137
+          - runner: ubuntu-24.04
+            arch: x64
+            node-version: 26
+            abi: 147
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            node-version: 26
+            abi: 147
+
+    steps:
+      - name: Download assembled npm package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package
+          path: release
+
+      - name: Install and load the exact npm package on Alpine 3.23
+        run: |
+          cd release
+          shasum -a 256 -c SHA256SUMS
+          tarball="$(find "$PWD" -type f -name 'fuse-napi-*.tgz' -print -quit)"
+          test -n "$tarball"
+          docker run --rm \
+            --volume "$tarball:/release/fuse-napi.tgz:ro" \
+            node:${{ matrix.node-version }}-alpine3.23 \
+            sh -eux -c '
+              apk add --no-cache fuse3
+              npm install \
+                --prefix /tmp/fuse-napi-consumer \
+                --ignore-scripts \
+                /release/fuse-napi.tgz
+              package_root=/tmp/fuse-napi-consumer/node_modules/fuse-napi
+              test ! -d "$package_root/build"
+              test -f \
+                "$package_root/prebuilds/linux-${{ matrix.arch }}-fuse4/fuse-napi.abi${{ matrix.abi }}.musl.node"
+              PREBUILDS_ONLY=1 node -e "
+                const Fuse = require(\"$package_root\")
+                if (typeof Fuse !== \"function\") process.exit(1)
+              "
+            '

@@ -120,6 +120,45 @@ tape('release verification requires every supported ABI prebuild', function (t) 
   }
 })
 
+tape('release verification requires the explicitly tagged musl prebuilds', function (t) {
+  const tempRoot = verificationFixture()
+  const abiFiles = ['abi127', 'abi137', 'abi147']
+  const ordinaryTargets = ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64']
+  const modernTargets = ['linux-x64-fuse4', 'linux-arm64-fuse4']
+
+  for (const target of ordinaryTargets.concat(modernTargets)) {
+    const directory = path.join(tempRoot, 'prebuilds', target)
+    fs.mkdirSync(directory, { recursive: true })
+    for (const abi of abiFiles) {
+      fs.writeFileSync(path.join(directory, `fuse-napi.${abi}.node`), 'prebuild')
+      if (modernTargets.includes(target)) {
+        fs.writeFileSync(path.join(directory, `fuse-napi.${abi}.musl.node`), 'prebuild')
+      }
+    }
+  }
+
+  const missing = path.join(
+    tempRoot,
+    'prebuilds',
+    'linux-arm64-fuse4',
+    'fuse-napi.abi137.musl.node'
+  )
+  fs.rmSync(missing)
+
+  try {
+    const result = verify({}, ['--artifacts'], tempRoot)
+    t.equal(result.status, 1, 'a missing musl release prebuild is rejected')
+    t.match(
+      result.stderr,
+      /linux-arm64-fuse4[/\\]fuse-napi\.abi137\.musl\.node/,
+      'the missing tagged musl artifact is identified exactly'
+    )
+    t.end()
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
 tape('privileged crash recovery remains an explicit test boundary', function (t) {
   t.equal(
     packageMetadata.scripts.test,
@@ -259,6 +298,21 @@ tape('release artifacts retain manually initiated production gates', function (t
   t.match(releaseWorkflow, /actions\/attest@/, 'the package and SBOM are attested')
   t.match(releaseWorkflow, /artifact-metadata: write/, 'attestation storage is authorized')
   t.match(releaseWorkflow, /linux-x64-fuse4/, 'the release contains SONAME 4 prebuilds')
+  t.match(
+    releaseWorkflow,
+    /fuse-napi\.abi\$\{\{ matrix\.abi \}\}\.musl\.node/,
+    'the release builds explicitly tagged musl prebuilds'
+  )
+  t.match(
+    releaseWorkflow,
+    /node:\$\{\{ matrix\.node-version \}\}-alpine3\.23/,
+    'the musl artifacts are built and loaded on the supported Alpine baseline'
+  )
+  t.match(
+    releaseGuide,
+    /24 Node\.js ABI-specific prebuilds/,
+    'the release inventory includes every musl artifact'
+  )
   t.match(
     releaseGuide,
     /both a physical Intel Mac and a physical Apple Silicon Mac/,

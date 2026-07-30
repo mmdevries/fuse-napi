@@ -34,11 +34,14 @@ Neither libfuse nor macFUSE is bundled or installed by this package. See
 | Platform | Minimum runtime | Architectures | Tested Node.js |
 | --- | --- | --- | --- |
 | Linux | glibc 2.31 and libfuse 3.10.3+ | x86-64, arm64 | 22, 24, 26 |
+| Alpine Linux | Alpine 3.23 and libfuse 3.17.3+ (musl) | x86-64, arm64 | 22, 24, 26 |
 | macOS | macOS 12 and macFUSE 5 with libfuse 3 | Intel x86-64, Apple Silicon arm64 | 22, 24, 26 |
 
-Release prebuilds are compiled on a glibc 2.31 Linux baseline and with
-`MACOSX_DEPLOYMENT_TARGET=12.0`. The release workflow rejects binaries that
-raise either minimum accidentally.
+Release prebuilds are compiled on a glibc 2.31 Linux baseline, Alpine 3.23 for
+musl, and with `MACOSX_DEPLOYMENT_TARGET=12.0`. Musl binaries carry an explicit
+`.musl.node` filename tag and are selected automatically in Alpine containers.
+The release workflow rejects binaries that raise a supported baseline
+accidentally.
 
 ## Requirements
 
@@ -52,6 +55,12 @@ On Debian or Ubuntu:
 
 ```sh
 sudo apt-get install build-essential fuse3 libfuse3-dev pkg-config
+```
+
+On Alpine Linux:
+
+```sh
+apk add build-base fuse3 fuse3-dev linux-headers pkgconf python3
 ```
 
 ### macOS

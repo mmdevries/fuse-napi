@@ -27,10 +27,22 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdollar-in-identifier-extension"
 #endif
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+/*
+ * Some supported libfuse headers contain file-scope static-assert macros with
+ * a trailing semicolon. Keep pedantic diagnostics strict for this addon while
+ * treating that external header implementation as a system boundary.
+ */
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
 #include <fuse.h>
 #include <fuse_opt.h>
 #include <fuse_common.h>
 #include <fuse_lowlevel.h>
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #if defined(__APPLE__) && defined(__clang__)
 #pragma clang diagnostic pop
 #endif
@@ -42,6 +54,7 @@
 #include <pthread.h>
 #ifdef __linux__
 #include <sys/sysmacros.h>
+#include <linux/ioctl.h>
 #include <linux/stat.h>
 #endif
 

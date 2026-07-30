@@ -73,6 +73,7 @@ function discover (
   if (platform === 'linux') {
     throw new Error(
       'System libfuse3 development files, the FUSE 3 mount helper, and pkg-config are required to build fuse-napi on Linux. ' +
+      'On Alpine, run: apk add build-base fuse3 fuse3-dev linux-headers pkgconf python3. ' +
       'On Debian or Ubuntu, run: sudo apt-get install libfuse3-dev fuse3 pkg-config'
     )
   }

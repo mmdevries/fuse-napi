@@ -9,6 +9,10 @@ tape('Linux dependency error is actionable', function (t) {
     () => discover('linux', () => null, () => false),
     /sudo apt-get install libfuse3-dev fuse3 pkg-config/
   )
+  t.throws(
+    () => discover('linux', () => null, () => false),
+    /apk add build-base fuse3 fuse3-dev linux-headers pkgconf python3/
+  )
   t.end()
 })
 
@@ -115,6 +119,49 @@ tape('Linux loader selects the libfuse SONAME 4 prebuild when available', functi
   t.end()
 })
 
+tape('Linux loader selects the musl SONAME 4 prebuild on Alpine', function (t) {
+  const expected = { binding: 'fuse4-musl' }
+  const prebuild = '/package/prebuilds/linux-x64-fuse4/fuse-napi.abi137.musl.node'
+  const loaded = loadNativeBinding('/package', {
+    platform: 'linux',
+    arch: 'x64',
+    abi: '137',
+    exists: name => name === '/etc/alpine-release' || name === prebuild,
+    loadDefault: () => {
+      t.fail('the baseline loader should not run')
+    },
+    loadFile: name => {
+      t.equal(name, prebuild, 'the exact ABI-specific musl prebuild is selected')
+      return expected
+    }
+  })
+
+  t.equal(loaded, expected, 'the musl binding is returned')
+  t.end()
+})
+
+tape('Linux loader supports an explicit musl override outside Alpine', function (t) {
+  const expected = { binding: 'fuse4-musl' }
+  const prebuild = '/package/prebuilds/linux-arm64-fuse4/fuse-napi.abi147.musl.node'
+  const loaded = loadNativeBinding('/package', {
+    platform: 'linux',
+    arch: 'arm64',
+    abi: '147',
+    libc: 'musl',
+    exists: name => name === prebuild,
+    loadDefault: () => {
+      t.fail('the baseline loader should not run')
+    },
+    loadFile: name => {
+      t.equal(name, prebuild, 'LIBC=musl resolves the tagged prebuild')
+      return expected
+    }
+  })
+
+  t.equal(loaded, expected, 'the explicit musl binding is returned')
+  t.end()
+})
+
 tape('Linux loader falls back to SONAME 3 when the modern runtime is absent', function (t) {
   const expected = { binding: 'fuse3' }
   const loaded = loadNativeBinding('/package', {
@@ -147,6 +194,7 @@ tape('Linux loader reports a missing FUSE runtime actionably', function (t) {
   } catch (err) {
     t.equal(err.code, 'EFUSEDEPENDENCY', 'the dependency failure has a stable code')
     t.match(err.message, /sudo apt-get install fuse3/, 'the failure is actionable')
+    t.match(err.message, /apk add fuse3/, 'the Alpine failure is actionable')
   }
   t.end()
 })

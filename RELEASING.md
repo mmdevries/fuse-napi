@@ -119,14 +119,16 @@ The manually confirmed workflow on the exact release tag:
 
 - rejects a tag that differs from `package.json` or `package-lock.json`;
 - invokes the complete Linux and hosted macOS CI matrix as a hard dependency;
-- builds 18 Node.js ABI-specific prebuilds: three supported Node.js ABIs
+- builds 24 Node.js ABI-specific prebuilds: three supported Node.js ABIs
   across four platform/architecture targets, plus both Linux architectures
-  for libfuse SONAME 4;
-- verifies architecture, libfuse 3 linkage, glibc 2.31, and macOS 12 baselines;
+  for both glibc and musl libfuse SONAME 4;
+- verifies architecture, libfuse 3 linkage, glibc 2.31, Alpine 3.23/musl,
+  and macOS 12 baselines;
 - loads every matching prebuild on Node.js 22, 24, and 26;
-- assembles one npm tarball containing all 18 binaries;
+- assembles one npm tarball containing all 24 binaries;
 - verifies and installs that exact tarball on every supported Node.js,
   platform, and architecture combination;
+- loads the exact tarball in Alpine 3.23 containers on x64 and arm64;
 - performs real mounts with that tarball on Linux x64/arm64 and runs the
   modern syscall suite from the exact SONAME 4 package;
 - records SHA-256 checksums and creates a CycloneDX production-dependency

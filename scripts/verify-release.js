@@ -57,16 +57,22 @@ if (verifyArtifacts) {
     'fuse-napi.abi147.node'
   ]
   const targets = [
-    'linux-x64',
-    'linux-arm64',
-    'darwin-x64',
-    'darwin-arm64',
-    'linux-x64-fuse4',
-    'linux-arm64-fuse4'
+    { directory: 'linux-x64', files: abiFiles },
+    { directory: 'linux-arm64', files: abiFiles },
+    { directory: 'darwin-x64', files: abiFiles },
+    { directory: 'darwin-arm64', files: abiFiles },
+    {
+      directory: 'linux-x64-fuse4',
+      files: abiFiles.concat(abiFiles.map(name => name.replace(/\.node$/, '.musl.node')))
+    },
+    {
+      directory: 'linux-arm64-fuse4',
+      files: abiFiles.concat(abiFiles.map(name => name.replace(/\.node$/, '.musl.node')))
+    }
   ]
   for (const target of targets) {
-    for (const abiFile of abiFiles) {
-      const prebuild = path.join(root, 'prebuilds', target, abiFile)
+    for (const abiFile of target.files) {
+      const prebuild = path.join(root, 'prebuilds', target.directory, abiFile)
       let stat
       try {
         stat = fs.statSync(prebuild)
