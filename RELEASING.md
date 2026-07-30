@@ -23,6 +23,8 @@ not produce GitHub OIDC provenance.
 
 1. Update `package.json` and both version fields in `package-lock.json`.
 2. Finalize `CHANGELOG.md`, compatibility documentation, and migration notes.
+   The changelog must contain a dated section matching `package.json`, and its
+   `Unreleased` section must be empty before tagging.
 3. Run:
 
    ```sh
@@ -99,6 +101,13 @@ not produce GitHub OIDC provenance.
     unset FUSE_NAPI_OTP
     ```
 
+12. Create a GitHub Release from the existing immutable tag. Do not let the
+    GitHub Release UI create or move the tag. Copy the finalized changelog entry
+    into the release notes, include the recorded Intel and Apple Silicon manual
+    test results, link the successful release workflow and npm package, and
+    attach the exact `fuse-napi-*.tgz`, `SHA256SUMS`, and
+    `fuse-napi-sbom.cdx.json` files from the verified `npm-package` artifact.
+
 Use a version such as `<next-version>-rc.1` first when validating release
 changes.
 Prerelease tags publish under npm's `next` dist-tag; stable versions publish
@@ -131,11 +140,13 @@ Apple Silicon hosts.
 
 ## Post-release verification
 
-Verify the registry metadata and install the published artifact on at least
-one clean Linux and one clean macOS host:
+Verify that `main` contains the released commit, then check the registry
+metadata and install the published artifact on at least one clean Linux and
+one clean macOS host:
 
 ```sh
 FUSE_NAPI_VERSION="$(node -p "require('./package.json').version")"
+test "$(git rev-parse "v$FUSE_NAPI_VERSION^{}")" = "$(git rev-parse origin/main)"
 npm view "fuse-napi@$FUSE_NAPI_VERSION" version dist.integrity
 npm install "fuse-napi@$FUSE_NAPI_VERSION"
 node -e "require('fuse-napi')"
@@ -145,3 +156,15 @@ unset FUSE_NAPI_VERSION
 Never reuse a published version or move an existing release tag. If a release
 is defective, deprecate it on npm, document the reason, and publish a new
 patch version.
+
+## Repository governance
+
+`main` is the current `2.x` release line. The `1.0` branch retains the supported
+`1.x` maintenance line. Public users can use and fork the repository and submit
+pull requests, but only the maintainer can merge or push to protected release
+branches.
+
+Pushes and pull requests intentionally do not start CI. The maintainer reviews
+a proposed change first, then manually starts CI when appropriate. Prebuild
+creation, release tags, GitHub Releases, and npm publication are always manual
+maintainer actions.

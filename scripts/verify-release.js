@@ -4,6 +4,7 @@ const path = require('path')
 const root = path.resolve(__dirname, '..')
 const manifest = readJson('package.json')
 const lockPath = path.join(root, 'package-lock.json')
+const changelogPath = path.join(root, 'CHANGELOG.md')
 const verifyArtifacts = process.argv.includes('--artifacts')
 const releaseTag = process.env.GITHUB_REF_TYPE === 'tag'
   ? process.env.GITHUB_REF_NAME
@@ -31,6 +32,22 @@ if (process.env.npm_lifecycle_event === 'prepublishOnly' && !releaseTag) {
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8')
 if (/not yet published to npm/i.test(readme)) {
   fail('README still claims that the package is not published')
+}
+
+let changelog
+try {
+  changelog = fs.readFileSync(changelogPath, 'utf8')
+} catch (err) {
+  fail(`Cannot read CHANGELOG.md: ${err.message}`)
+}
+if (!changelog.includes(`## ${manifest.version} - `)) {
+  fail(`CHANGELOG.md must contain a dated section for ${manifest.version}`)
+}
+if (releaseTag || verifyArtifacts || process.env.npm_lifecycle_event === 'prepublishOnly') {
+  const unreleased = changelogSection(changelog, 'Unreleased')
+  if (/(?:^|\n)###\s|(?:^|\n)-\s/.test(unreleased)) {
+    fail('CHANGELOG.md contains staged Unreleased entries; move them into the release section')
+  }
 }
 
 if (verifyArtifacts) {
@@ -77,6 +94,16 @@ function isValidVersion (version) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version)
   if (!match || !match[4]) return !!match
   return match[4].split('.').every(identifier => !/^\d+$/.test(identifier) || !/^0\d+/.test(identifier))
+}
+
+function changelogSection (source, heading) {
+  const startMarker = `## ${heading}`
+  const start = source.indexOf(startMarker)
+  if (start === -1) fail(`CHANGELOG.md is missing the "${heading}" section`)
+  const contentStart = source.indexOf('\n', start + startMarker.length)
+  if (contentStart === -1) return ''
+  const next = source.indexOf('\n## ', contentStart + 1)
+  return source.slice(contentStart + 1, next === -1 ? source.length : next)
 }
 
 function fail (message) {

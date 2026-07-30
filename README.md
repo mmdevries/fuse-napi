@@ -674,4 +674,6 @@ licenses.
 
 Security issues should be reported privately according to
 [SECURITY.md](./SECURITY.md). Maintainer release procedures are documented in
-[RELEASING.md](./RELEASING.md).
+[RELEASING.md](./RELEASING.md). Contributions are accepted through pull
+requests under the maintainer-controlled process in
+[CONTRIBUTING.md](./CONTRIBUTING.md).

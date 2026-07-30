@@ -55,10 +55,57 @@ tape('manual publishing without a release tag is rejected', function (t) {
   t.end()
 })
 
+tape('release metadata requires a changelog section matching the package version', function (t) {
+  const tempRoot = verificationFixture()
+  const changelogPath = path.join(tempRoot, 'CHANGELOG.md')
+  const changelog = fs.readFileSync(changelogPath, 'utf8')
+  fs.writeFileSync(
+    changelogPath,
+    changelog.replace(`## ${packageMetadata.version} - `, '## 9.9.9 - ')
+  )
+
+  try {
+    const result = verify({
+      GITHUB_REF_TYPE: 'tag',
+      GITHUB_REF_NAME: releaseTag
+    }, [], tempRoot)
+    t.equal(result.status, 1, 'a missing version section is rejected')
+    t.match(result.stderr, /dated section/, 'failure identifies the changelog requirement')
+    t.end()
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
+tape('tagged releases require an empty Unreleased section', function (t) {
+  const tempRoot = verificationFixture()
+  const changelogPath = path.join(tempRoot, 'CHANGELOG.md')
+  const changelog = fs.readFileSync(changelogPath, 'utf8')
+  fs.writeFileSync(
+    changelogPath,
+    changelog.replace(
+      '## Unreleased\n',
+      '## Unreleased\n\n### Added\n\n- A staged release change.\n'
+    )
+  )
+
+  try {
+    const result = verify({
+      GITHUB_REF_TYPE: 'tag',
+      GITHUB_REF_NAME: releaseTag
+    }, [], tempRoot)
+    t.equal(result.status, 1, 'staged Unreleased entries are rejected')
+    t.match(result.stderr, /Unreleased entries/, 'failure identifies the unfinished release notes')
+    t.end()
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true })
+  }
+})
+
 tape('release verification requires every supported ABI prebuild', function (t) {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fuse-napi-release-test-'))
   fs.mkdirSync(path.join(tempRoot, 'scripts'))
-  for (const filename of ['package.json', 'package-lock.json', 'README.md']) {
+  for (const filename of ['package.json', 'package-lock.json', 'README.md', 'CHANGELOG.md']) {
     fs.copyFileSync(path.join(root, filename), path.join(tempRoot, filename))
   }
   fs.copyFileSync(script, path.join(tempRoot, 'scripts', 'verify-release.js'))
@@ -222,6 +269,16 @@ tape('release artifacts retain manually initiated production gates', function (t
     /scripts\/package-mount-smoke\.js/,
     'the release guide exercises the exact package with the mount smoke script'
   )
+  t.match(
+    releaseGuide,
+    /Create a GitHub Release from the existing immutable tag/,
+    'the release guide requires a permanent public release record'
+  )
+  t.match(
+    releaseGuide,
+    /attach the exact `fuse-napi-\*\.tgz`, `SHA256SUMS`, and/,
+    'the GitHub Release retains the verified package, checksums, and SBOM'
+  )
   t.end()
 })
 
@@ -238,6 +295,16 @@ function verify (overrides, args = [], workingRoot = root) {
     encoding: 'utf8',
     env
   })
+}
+
+function verificationFixture () {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fuse-napi-release-metadata-'))
+  fs.mkdirSync(path.join(tempRoot, 'scripts'))
+  for (const filename of ['package.json', 'package-lock.json', 'README.md', 'CHANGELOG.md']) {
+    fs.copyFileSync(path.join(root, filename), path.join(tempRoot, filename))
+  }
+  fs.copyFileSync(script, path.join(tempRoot, 'scripts', 'verify-release.js'))
+  return tempRoot
 }
 
 function workflowJob (workflow, name) {

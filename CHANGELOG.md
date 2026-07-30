@@ -5,6 +5,26 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
+## 2.1.1 - 2026-07-30
+
+### Fixed
+
+- Corrected the bundled release history so every feature, compatibility change,
+  production-hardening fix, and supply-chain guarantee shipped in `2.1.0` is
+  documented under that release instead of `Unreleased`.
+- Release verification now requires a changelog section matching the package
+  version and rejects tagged or packaged releases that still contain staged
+  `Unreleased` entries.
+
+### Changed
+
+- The current `2.x` release line is maintained on `main`; the `1.x` line is
+  retained on the `1.0` maintenance branch. Repository contributions are
+  accepted through pull requests, while CI, prebuild creation, tagging, and
+  publication remain maintainer-controlled manual actions.
+
+## 2.1.0 - 2026-07-30
+
 ### Added
 
 - Production runtime preflight through `Fuse.checkEnvironment()`, performed
@@ -27,6 +47,14 @@ All notable changes to this project are documented here. Releases follow
 
 ### Changed
 
+- Mount options now pass an explicit FUSE 3 conformance preflight in both the
+  constructor and the new `Fuse.validateOptions()` helper. Stable error codes
+  identify removed/internal options, conflicts, missing dependencies,
+  platform misuse, and invalid module identifiers before libfuse is invoked.
+- `nonEmpty`/`nonempty`, `fd`, and `userId`/`user_id` are rejected with
+  actionable errors instead of being ignored or reaching libfuse3.
+- Contradictory access, page-cache, inode-retention, block-device, and
+  auto-cache settings are rejected deterministically.
 - Linux release packages now ship separate Node.js ABI-specific prebuilds for
   libfuse SONAME 3 and SONAME 4 on x64 and arm64. Local source builds retain
   priority and missing runtime dependencies produce actionable errors.
@@ -56,19 +84,6 @@ All notable changes to this project are documented here. Releases follow
   in-flight callbacks, explicit JavaScript closure, and concurrent teardown.
 - FUSE 3 buffer, poll, worker, and inode-cache resources are released
   deterministically during normal and failed teardown paths.
-
-## 2.1.0 - 2026-07-29
-
-### Changed
-
-- Mount options now pass an explicit FUSE 3 conformance preflight in both the
-  constructor and the new `Fuse.validateOptions()` helper. Stable error codes
-  identify removed/internal options, conflicts, missing dependencies,
-  platform misuse, and invalid module identifiers before libfuse is invoked.
-- `nonEmpty`/`nonempty`, `fd`, and `userId`/`user_id` are rejected with
-  actionable errors instead of being ignored or reaching libfuse3.
-- Contradictory access, page-cache, inode-retention, block-device, and
-  auto-cache settings are rejected deterministically.
 
 ## 2.0.0 - 2026-07-29
 

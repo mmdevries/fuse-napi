@@ -2,11 +2,11 @@
 
 ## Supported versions
 
-| Version | Security updates |
-| --- | --- |
-| 2.x | Yes |
-| 1.x | Critical fixes during the documented transition window |
-| 0.0.x | No |
+| Version | Branch | Security updates |
+| --- | --- | --- |
+| 2.x | `main` | Yes |
+| 1.x | `1.0` | Critical fixes during the documented transition window |
+| 0.0.x | — | No |
 
 The latest `2.x` release is the actively supported line. Users should also
 keep their operating-system libfuse 3 or macFUSE 5 runtime current.
