@@ -179,6 +179,11 @@ observations prove that the mount is already detached. If the helper fails and
 the mount remains attached, mounting fails with `EFUSEUNMOUNT` while retaining
 both the helper and observation errors. A successful helper whose detach is
 still not stably observable after 15 seconds fails with `EFUSEUNMOUNTWAIT`.
+Unmount helpers inherit ordinary process settings such as `PATH`, but dynamic
+loader injection variables (`LD_*` and `DYLD_*`) are removed before executing
+the system helper. This keeps sanitizer, instrumentation, and application
+preloads from changing the privileged unmount boundary. Helper standard output
+and error output are retained on `helperError` when unmounting fails.
 
 On macOS, volume presentation can additionally be configured with:
 

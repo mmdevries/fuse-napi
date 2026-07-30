@@ -117,6 +117,20 @@ tape('unmount passes the mountpoint as a literal process argument', function (t)
   const originalExecFile = childProcess.execFile
   const indexPath = require.resolve('../')
   const dangerousPath = '/tmp/fuse;touch /tmp/should-not-exist'
+  const unsafeEnvironment = {
+    LD_PRELOAD: '/tmp/untrusted-linux-loader.so',
+    LD_LIBRARY_PATH: '/tmp/untrusted-linux-libraries',
+    DYLD_INSERT_LIBRARIES: '/tmp/untrusted-macos-loader.dylib',
+    DYLD_LIBRARY_PATH: '/tmp/untrusted-macos-libraries'
+  }
+  const originalEnvironment = {}
+
+  for (const [name, value] of Object.entries(unsafeEnvironment)) {
+    originalEnvironment[name] = process.env[name]
+    process.env[name] = value
+  }
+  originalEnvironment.FUSE_NAPI_SAFE_HELPER_ENV = process.env.FUSE_NAPI_SAFE_HELPER_ENV
+  process.env.FUSE_NAPI_SAFE_HELPER_ENV = 'preserved'
 
   childProcess.execFile = function (command, args, options, cb) {
     t.ok(command === 'diskutil' || command === 'fusermount3', 'known unmount executable is selected')
@@ -127,6 +141,11 @@ tape('unmount passes the mountpoint as a literal process argument', function (t)
     t.equal(options.shell, false, 'no shell is involved')
     t.equal(options.timeout, 15000, 'standalone unmount has a finite deadline')
     t.equal(options.killSignal, 'SIGKILL', 'a timed-out helper cannot ignore termination')
+    t.equal(options.env.FUSE_NAPI_SAFE_HELPER_ENV, 'preserved', 'ordinary environment variables are retained')
+    for (const name of Object.keys(unsafeEnvironment)) {
+      t.notOk(name in options.env, `${name} cannot inject code into the system helper`)
+    }
+    t.equal(process.env.LD_PRELOAD, unsafeEnvironment.LD_PRELOAD, 'the parent process environment is not mutated')
     process.nextTick(cb, null)
   }
 
@@ -134,6 +153,7 @@ tape('unmount passes the mountpoint as a literal process argument', function (t)
   const IsolatedFuse = require('../')
   IsolatedFuse.unmount(dangerousPath, function (err) {
     childProcess.execFile = originalExecFile
+    restoreEnvironment(originalEnvironment)
     delete require.cache[indexPath]
     t.error(err, 'literal argument unmount succeeds')
     t.end()
@@ -216,7 +236,7 @@ tape('unmount preserves helper and observation failures when the mount remains',
   let clockReads = 0
 
   childProcess.execFile = function (command, args, options, cb) {
-    process.nextTick(cb, helperError)
+    process.nextTick(cb, helperError, 'helper stdout', 'helper stderr')
   }
   filesystem.stat = function (name, cb) {
     const dev = name === mountpoint ? 2 : 1
@@ -237,16 +257,28 @@ tape('unmount preserves helper and observation failures when the mount remains',
     t.equal(err && err.code, 'EFUSEUNMOUNT', 'an attached mount has a stable error code')
     t.equal(err && err.cause, helperError, 'the helper failure is retained as the primary cause')
     t.equal(err && err.helperError, helperError, 'the helper diagnostic is directly available')
+    t.equal(err && err.helperError && err.helperError.stdout, 'helper stdout', 'helper stdout is retained')
+    t.equal(err && err.helperError && err.helperError.stderr, 'helper stderr', 'helper stderr is retained')
     t.equal(
       err && err.observationError && err.observationError.code,
       'EFUSEUNMOUNTWAIT',
       'the failed detach observation is retained'
     )
     t.equal(err && err.mountpoint, mountpoint, 'the failed mountpoint is identified')
-    t.match(err && err.message, /failed.*did not detach/, 'the failure describes both conditions')
+    t.match(err && err.message, /failed.*did not detach.*helper stderr/, 'the failure includes bounded helper context')
     t.end()
   })
 })
+
+function restoreEnvironment (values) {
+  for (const [name, value] of Object.entries(values)) {
+    if (value === undefined) {
+      delete process.env[name]
+    } else {
+      process.env[name] = value
+    }
+  }
+}
 
 tape('unmount wait is bounded and preserves the disconnect cause', function (t) {
   const originalExecFile = childProcess.execFile

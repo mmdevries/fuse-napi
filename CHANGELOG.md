@@ -16,7 +16,9 @@ All notable changes to this project are documented here. Releases follow
   when built with libfuse 3.18 or newer.
 - Deterministic option fuzzing, native static analysis, ASan/UBSan mount
   integration, repeated-mount soak coverage, and a libfuse 3.18 modern-syscall
-  CI gate.
+  CI gate. The crashed-mount recovery fixture tolerates an incidental
+  kernel-side auto-detach only by creating a new broken mount, so it still
+  proves the real disconnected-mount path without becoming flaky.
 
 ### Changed
 
@@ -37,7 +39,9 @@ All notable changes to this project are documented here. Releases follow
   proven; otherwise `EFUSEUNMOUNT` retains the helper and observation errors
   without continuing into native mount startup. This removes Linux races that
   could incorrectly report `Mountpoint in use`; a stalled detach after helper
-  success reports `EFUSEUNMOUNTWAIT`.
+  success reports `EFUSEUNMOUNTWAIT`. System unmount helpers no longer inherit
+  `LD_*` or `DYLD_*` loader injection, and bounded helper output is retained in
+  failure diagnostics.
 - Native poll registrations now have thread-safe shared ownership across
   in-flight callbacks, explicit JavaScript closure, and concurrent teardown.
 - FUSE 3 buffer, poll, worker, and inode-cache resources are released

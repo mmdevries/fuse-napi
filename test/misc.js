@@ -12,6 +12,7 @@ const simpleFS = require('./fixtures/simple-fs')
 
 const mnt = createMountpoint()
 const BROKEN_MOUNT_FIXTURE_TIMEOUT = 10 * 1000
+const BROKEN_MOUNT_FIXTURE_ATTEMPTS = 5
 
 tape('mount', function (t) {
   const fuse = new Fuse(mnt, {}, { force: true })
@@ -206,7 +207,7 @@ tape('static unmounting', function (t) {
   t.end()
 })
 
-function createBrokenMountpoint (mnt, cb) {
+function createBrokenMountpoint (mnt, cb, attempt = 1) {
   const child = spawn(process.execPath, ['-e', `
     const Fuse = require('..')
     const mnt = ${JSON.stringify(mnt)}
@@ -287,7 +288,23 @@ function createBrokenMountpoint (mnt, cb) {
       return cb(err)
     }
 
-    waitForDisconnectedMount(mnt, cb)
+    waitForDisconnectedMount(mnt, function (err) {
+      if (
+        err &&
+        err.code === 'EFUSETESTNOTBROKEN' &&
+        attempt < BROKEN_MOUNT_FIXTURE_ATTEMPTS
+      ) {
+        return setTimeout(
+          createBrokenMountpoint,
+          10,
+          mnt,
+          cb,
+          attempt + 1
+        )
+      }
+      if (err && err.code === 'EFUSETESTNOTBROKEN') err.attempts = attempt
+      cb(err)
+    })
   })
 
   function abort (err) {

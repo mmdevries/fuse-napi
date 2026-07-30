@@ -24,6 +24,7 @@ const HAS_FOLDER_ICON = IS_OSX && fs.existsSync(OSX_FOLDER_ICON)
 const DEFAULT_TIMEOUT = 15 * 1000
 const UNMOUNT_POLL_INTERVAL = 10
 const UNMOUNT_STABILITY_CHECKS = 3
+const UNMOUNT_HELPER_UNSAFE_ENV_PREFIXES = ['LD_', 'DYLD_']
 const DEFAULT_MAX_CONCURRENCY = 4
 const MAX_MAX_CONCURRENCY = 64
 const MAX_INT32 = 0x7fffffff
@@ -564,8 +565,13 @@ class Fuse extends Nanoresource {
     execFile(command, args, {
       shell: false,
       timeout: DEFAULT_TIMEOUT,
-      killSignal: 'SIGKILL'
-    }, helperError => {
+      killSignal: 'SIGKILL',
+      env: createUnmountHelperEnvironment()
+    }, (helperError, stdout, stderr) => {
+      if (helperError) {
+        if (typeof stdout === 'string' && stdout.length > 0) helperError.stdout = stdout
+        if (typeof stderr === 'string' && stderr.length > 0) helperError.stderr = stderr
+      }
       return waitForUnmountedMountpoint(mnt, observationError => {
         if (!observationError) return cb(null)
         if (!helperError) return cb(observationError)
@@ -1791,10 +1797,21 @@ function waitForUnmountedMountpoint (mnt, cb) {
   }
 }
 
+function createUnmountHelperEnvironment () {
+  const env = {}
+  for (const [name, value] of Object.entries(process.env)) {
+    if (UNMOUNT_HELPER_UNSAFE_ENV_PREFIXES.some(prefix => name.startsWith(prefix))) continue
+    env[name] = value
+  }
+  return env
+}
+
 function createUnmountError (mnt, command, helperError, observationError) {
   const mountpoint = path.resolve(mnt)
+  const helperDetail = formatHelperError(helperError)
   const err = new Error(
-    `${command} failed and FUSE mount ${JSON.stringify(mountpoint)} did not detach`
+    `${command} failed and FUSE mount ${JSON.stringify(mountpoint)} did not detach` +
+    (helperDetail ? `: ${helperDetail}` : '')
   )
   err.code = 'EFUSEUNMOUNT'
   err.mountpoint = mountpoint
@@ -1803,6 +1820,16 @@ function createUnmountError (mnt, command, helperError, observationError) {
   err.helperError = helperError
   err.observationError = observationError
   return err
+}
+
+function formatHelperError (err) {
+  if (!err) return ''
+  const detail = typeof err.stderr === 'string' && err.stderr.trim()
+    ? err.stderr.trim()
+    : typeof err.message === 'string'
+      ? err.message.trim()
+      : ''
+  return detail.replace(/\s+/g, ' ').slice(0, 512)
 }
 
 function isDisconnectedError (err) {
