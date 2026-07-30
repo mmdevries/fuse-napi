@@ -38,6 +38,11 @@ All notable changes to this project are documented here. Releases follow
 
 ### Fixed
 
+- The libfuse 3.18/SONAME 4 release gate now exercises the exact installed npm
+  tarball through a dependency-free syscall runner. Clean consumers no longer
+  fail because the development-only `tape` harness is absent, and release
+  contract tests prevent the package smoke from regaining a development
+  dependency.
 - Forced recovery from a disconnected mount now waits, with a finite deadline,
   until the lazy FUSE detach is stable before starting a replacement mount. A
   racing helper failure is accepted only after the detached postcondition is

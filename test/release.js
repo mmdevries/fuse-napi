@@ -13,6 +13,13 @@ const releaseGuide = fs.readFileSync(path.join(root, 'RELEASING.md'), 'utf8')
 const packageMetadata = require('../package.json')
 const releaseTag = `v${packageMetadata.version}`
 const privilegedRecoveryTest = path.join(root, 'test', 'privileged', 'broken-mount.js')
+const modernOperationsRunner = path.join(
+  root,
+  'test',
+  'fixtures',
+  'modern-operations-runner.js'
+)
+const modernOperationsSmoke = path.join(root, 'scripts', 'modern-operations-smoke.js')
 
 tape('release metadata accepts the exact package tag', function (t) {
   const result = verify({
@@ -78,6 +85,41 @@ tape('privileged crash recovery remains an explicit test boundary', function (t)
     'crashed-mount recovery has a dedicated command'
   )
   t.ok(fs.existsSync(privilegedRecoveryTest), 'the privileged recovery suite exists')
+  t.end()
+})
+
+tape('modern package smoke has no development dependency boundary', function (t) {
+  const runnerSource = fs.readFileSync(modernOperationsRunner, 'utf8')
+  const smokeSource = fs.readFileSync(modernOperationsSmoke, 'utf8')
+  const modernPackageJob = workflowJob(releaseWorkflow, 'modern-package-smoke')
+  const missingArgument = spawnSync(process.execPath, [modernOperationsSmoke], {
+    cwd: root,
+    encoding: 'utf8'
+  })
+
+  t.notOk(
+    /require\(['"]tape['"]\)/.test(runnerSource),
+    'the shared runner does not require tape'
+  )
+  t.notOk(
+    /require\(['"]tape['"]\)/.test(smokeSource),
+    'the package smoke does not require tape'
+  )
+  t.equal(missingArgument.status, 64, 'the package smoke requires an explicit package root')
+  t.match(missingArgument.stderr, /Usage:/, 'a missing package root is actionable')
+  t.match(
+    modernPackageJob,
+    /node \.\.\/scripts\/modern-operations-smoke\.js "\$package_root"/,
+    'the SONAME 4 gate passes the exact installed package to the dependency-free smoke'
+  )
+  t.notOk(
+    /\bnpm ci\b/.test(modernPackageJob),
+    'the clean package consumer installs no dev tree'
+  )
+  t.notOk(
+    /FUSE_NAPI_PACKAGE_ROOT|node \.\.\/test\/modern-operations\.js/.test(modernPackageJob),
+    'the package gate cannot fall back to the tape development wrapper'
+  )
   t.end()
 })
 
@@ -196,4 +238,12 @@ function verify (overrides, args = [], workingRoot = root) {
     encoding: 'utf8',
     env
   })
+}
+
+function workflowJob (workflow, name) {
+  const start = workflow.indexOf(`\n  ${name}:\n`)
+  if (start === -1) return ''
+  const remainder = workflow.slice(start + 1)
+  const nextJob = remainder.search(/\n  [a-z][a-z0-9-]+:\n/)
+  return nextJob === -1 ? remainder : remainder.slice(0, nextJob)
 }

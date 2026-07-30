@@ -113,7 +113,9 @@ suite behind an explicit non-interactive root boundary on every supported
 OS/Node.js combination. ASan/UBSan covers that privileged recovery path as a
 separate command, and the soak gate uses the same deterministic mount
 capability boundary. Only the required execution configuration is forwarded
-explicitly across each boundary.
+explicitly across each boundary. The libfuse 3.18/SONAME 4 gate exercises its
+clean tarball consumer through a dependency-free syscall runner, so
+development dependencies cannot mask packaging defects.
 
 The test suite is green on Linux arm64 with libfuse 3.10.3 and on Apple Silicon
 with macFUSE 5.3.3. Hosted CI is configured to build both macOS architectures

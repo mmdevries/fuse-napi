@@ -679,4 +679,4 @@ jobs:
           test ! -d "$package_root/build"
           ldd "$package_root/prebuilds/linux-x64-fuse4/fuse-napi.abi127.node" |
             grep 'libfuse3.so.4'
-          FUSE_NAPI_PACKAGE_ROOT="$package_root" node ../test/modern-operations.js
+          node ../scripts/modern-operations-smoke.js "$package_root"

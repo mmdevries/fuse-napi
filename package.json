@@ -91,7 +91,7 @@
     "access": "public"
   },
   "scripts": {
-    "check": "node --check index.js && node --check example.js && node --check lib/environment.js && node --check lib/fuse3-options.js && node --check lib/macfuse.js && node --check lib/native-binding.js && node --check scripts/fuse-config.js && node --check scripts/mount-soak.js && node --check scripts/package-mount-smoke.js && node --check scripts/verify-release.js && node --check test/modern-operations.js && node --check test/option-fuzz.js && node --check test/privileged/broken-mount.js",
+    "check": "node --check index.js && node --check example.js && node --check lib/environment.js && node --check lib/fuse3-options.js && node --check lib/macfuse.js && node --check lib/native-binding.js && node --check scripts/fuse-config.js && node --check scripts/modern-operations-smoke.js && node --check scripts/mount-soak.js && node --check scripts/package-mount-smoke.js && node --check scripts/verify-release.js && node --check test/fixtures/modern-operations-runner.js && node --check test/modern-operations.js && node --check test/option-fuzz.js && node --check test/privileged/broken-mount.js",
     "install": "node-gyp-build",
     "test": "tape test/*.js",
     "test:package-mount": "node scripts/package-mount-smoke.js",
