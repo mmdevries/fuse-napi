@@ -16,12 +16,14 @@ All notable changes to this project are documented here. Releases follow
   when built with libfuse 3.18 or newer.
 - Deterministic option fuzzing, native static analysis, ASan/UBSan mount
   integration, repeated-mount soak coverage, and a libfuse 3.18 modern-syscall
-  CI gate. The crashed-mount recovery fixture tolerates an incidental
-  kernel-side auto-detach only by creating a new broken mount, so it still
-  proves the real disconnected-mount path without becoming flaky. Mounted
-  sanitizer and soak gates receive an explicit root capability boundary while
-  the normal Linux matrix retains complete unprivileged integration coverage,
-  preventing hosted-runner `EPERM` failures from masking sanitizer results.
+  CI gate. Crashed-mount recovery is isolated as an explicit privileged suite
+  on every Linux OS/Node.js matrix combination and under ASan/UBSan, while the
+  ordinary integration suite remains unprivileged. Its fixture tolerates an
+  incidental kernel-side auto-detach only by creating a new broken mount, so
+  it still proves the real disconnected-mount path without becoming flaky.
+  Sanitizer and soak gates retain an explicit root capability boundary,
+  preventing hosted-runner `EPERM` failures from masking native safety
+  results.
 
 ### Changed
 

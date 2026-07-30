@@ -94,16 +94,26 @@ lifecycle, and option tests. `npm run test:fuzz` deterministically fuzzes the
 public validation boundary, and `npm run test:soak` repeatedly mounts,
 exercises, and unmounts the filesystem.
 
+Recovery from a deliberately crashed FUSE daemon has a stronger privilege
+contract because deterministic cleanup requires `CAP_SYS_ADMIN` on hosted
+Linux runners. It is isolated from the ordinary suite and can be run with:
+
+```sh
+sudo env "PATH=$PATH" npm run test:privileged-recovery
+```
+
 The GitHub `CI` workflow is started manually with `workflow_dispatch`; pushes
 and pull requests never trigger it. The manually started release workflow can
 reuse the same matrix through `workflow_call`. In addition to the
 platform/Node.js matrix, it builds against libfuse 3.18, exercises modern
 syscalls, runs static analysis, deterministic fuzzing, ASan/UBSan, and a mount
-soak test. The normal Linux matrix exercises the complete public API as the
-unprivileged runner user. The mounted sanitizer and soak gates run behind an
-explicit non-interactive root boundary so crash-recovery unmounts have
-deterministic `CAP_SYS_ADMIN`; sanitizer and soak configuration is forwarded
-explicitly across that boundary.
+soak test. The normal Linux matrix exercises the ordinary public API paths as
+the unprivileged runner user, then runs the isolated crashed-mount recovery
+suite behind an explicit non-interactive root boundary on every supported
+OS/Node.js combination. ASan/UBSan covers that privileged recovery path as a
+separate command, and the soak gate uses the same deterministic mount
+capability boundary. Only the required execution configuration is forwarded
+explicitly across each boundary.
 
 The test suite is green on Linux arm64 with libfuse 3.10.3 and on Apple Silicon
 with macFUSE 5.3.3. Hosted CI is configured to build both macOS architectures

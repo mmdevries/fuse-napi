@@ -91,11 +91,12 @@
     "access": "public"
   },
   "scripts": {
-    "check": "node --check index.js && node --check example.js && node --check lib/environment.js && node --check lib/fuse3-options.js && node --check lib/macfuse.js && node --check lib/native-binding.js && node --check scripts/fuse-config.js && node --check scripts/mount-soak.js && node --check scripts/package-mount-smoke.js && node --check scripts/verify-release.js && node --check test/modern-operations.js && node --check test/option-fuzz.js",
+    "check": "node --check index.js && node --check example.js && node --check lib/environment.js && node --check lib/fuse3-options.js && node --check lib/macfuse.js && node --check lib/native-binding.js && node --check scripts/fuse-config.js && node --check scripts/mount-soak.js && node --check scripts/package-mount-smoke.js && node --check scripts/verify-release.js && node --check test/modern-operations.js && node --check test/option-fuzz.js && node --check test/privileged/broken-mount.js",
     "install": "node-gyp-build",
     "test": "tape test/*.js",
     "test:package-mount": "node scripts/package-mount-smoke.js",
     "test:fuzz": "node test/option-fuzz.js",
+    "test:privileged-recovery": "tape test/privileged/broken-mount.js",
     "test:soak": "node --expose-gc scripts/mount-soak.js",
     "test:unit": "tape test/dependencies.js test/environment.js test/errno.js test/hardening.js test/mount-ready.js test/options.js test/release.js",
     "test:types": "tsc -p tsconfig.json",

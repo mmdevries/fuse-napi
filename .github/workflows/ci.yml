@@ -57,8 +57,15 @@ jobs:
           sudo modprobe fuse
           sudo chmod a+rw /dev/fuse
 
-      - name: Run Linux integration tests
+      - name: Run unprivileged Linux integration tests
         run: npm test
+
+      - name: Exercise privileged crashed-mount recovery
+        run: |
+          test "$(sudo -n id -u)" = 0
+          sudo -n env \
+            "PATH=$PATH" \
+            npm run test:privileged-recovery
 
       - name: Verify external libfuse linkage
         run: |
@@ -245,6 +252,12 @@ jobs:
             "LD_PRELOAD=$asan_runtime" \
             "PATH=$PATH" \
             npm test
+          sudo -n env \
+            "ASAN_OPTIONS=$ASAN_OPTIONS" \
+            "UBSAN_OPTIONS=$UBSAN_OPTIONS" \
+            "LD_PRELOAD=$asan_runtime" \
+            "PATH=$PATH" \
+            npm run test:privileged-recovery
 
       - name: Exercise repeated mount, concurrency, and cleanup cycles
         env:

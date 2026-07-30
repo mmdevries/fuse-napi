@@ -10,7 +10,9 @@ const ciWorkflow = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 
 const macosWorkflow = path.join(root, '.github/workflows/macos-integration.yml')
 const releaseWorkflow = fs.readFileSync(path.join(root, '.github/workflows/prebuilds.yml'), 'utf8')
 const releaseGuide = fs.readFileSync(path.join(root, 'RELEASING.md'), 'utf8')
-const releaseTag = `v${require('../package.json').version}`
+const packageMetadata = require('../package.json')
+const releaseTag = `v${packageMetadata.version}`
+const privilegedRecoveryTest = path.join(root, 'test', 'privileged', 'broken-mount.js')
 
 tape('release metadata accepts the exact package tag', function (t) {
   const result = verify({
@@ -64,6 +66,21 @@ tape('release verification requires every supported ABI prebuild', function (t) 
   }
 })
 
+tape('privileged crash recovery remains an explicit test boundary', function (t) {
+  t.equal(
+    packageMetadata.scripts.test,
+    'tape test/*.js',
+    'the default suite remains unprivileged and excludes nested privileged tests'
+  )
+  t.equal(
+    packageMetadata.scripts['test:privileged-recovery'],
+    'tape test/privileged/broken-mount.js',
+    'crashed-mount recovery has a dedicated command'
+  )
+  t.ok(fs.existsSync(privilegedRecoveryTest), 'the privileged recovery suite exists')
+  t.end()
+})
+
 tape('release artifacts retain manually initiated production gates', function (t) {
   t.match(ciWorkflow, /\n  workflow_dispatch:\n/, 'CI remains manually dispatchable')
   t.notOk(/\n  push:\n/.test(ciWorkflow), 'pushes cannot trigger CI')
@@ -92,13 +109,28 @@ tape('release artifacts retain manually initiated production gates', function (t
   t.match(ciWorkflow, /-fsanitize=address,undefined/, 'CI runs ASan and UBSan')
   t.equal(
     (ciWorkflow.match(/test "\$\(sudo -n id -u\)" = 0/g) || []).length,
-    2,
-    'mounted sanitizer gates require an explicit non-interactive root boundary'
+    3,
+    'all privileged mount gates require an explicit non-interactive root boundary'
   )
   t.equal(
     (ciWorkflow.match(/sudo -n env \\\n/g) || []).length,
+    4,
+    'privileged mount gates preserve an explicit environment behind sudo'
+  )
+  t.equal(
+    (ciWorkflow.match(/npm run test:privileged-recovery/g) || []).length,
     2,
-    'mounted sanitizer gates preserve their explicit environment behind sudo'
+    'crashed-mount recovery runs in the Linux matrix and under sanitizers'
+  )
+  t.match(
+    ciWorkflow,
+    /Run unprivileged Linux integration tests\n        run: npm test/,
+    'the ordinary Linux integration suite remains unprivileged'
+  )
+  t.match(
+    ciWorkflow,
+    /Run the complete mounted suite under sanitizers[\s\S]*?npm test[\s\S]*?npm run test:privileged-recovery/,
+    'sanitizers cover both ordinary mounts and privileged crash recovery'
   )
   t.notOk(
     /export LD_PRELOAD/.test(ciWorkflow),
