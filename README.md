@@ -172,11 +172,13 @@ Create a new `Fuse` object.
 ```
 
 `force` only detaches a disconnected FUSE mount; it does not replace a healthy
-mounted filesystem. A successful unmount helper is followed by a bounded
-stability check, so the replacement mount does not race a lazy detach.
-Unmount-helper errors are returned without attempting a replacement mount. If
-the detach is still not stably observable after 15 seconds, mounting fails
-with `EFUSEUNMOUNTWAIT`.
+mounted filesystem. Every unmount attempt is followed by a bounded stability
+check, so the replacement mount does not race a lazy or concurrent detach. A
+non-zero helper result is treated as an idempotent success only when repeated
+observations prove that the mount is already detached. If the helper fails and
+the mount remains attached, mounting fails with `EFUSEUNMOUNT` while retaining
+both the helper and observation errors. A successful helper whose detach is
+still not stably observable after 15 seconds fails with `EFUSEUNMOUNTWAIT`.
 
 On macOS, volume presentation can additionally be configured with:
 

@@ -2,7 +2,7 @@ const os = require('os')
 const fs = require('fs')
 const path = require('path')
 const tape = require('tape')
-const { spawnSync, exec } = require('child_process')
+const { spawn, exec } = require('child_process')
 
 const createMountpoint = require('./fixtures/mnt')
 
@@ -11,6 +11,7 @@ const { unmount } = require('./helpers')
 const simpleFS = require('./fixtures/simple-fs')
 
 const mnt = createMountpoint()
+const BROKEN_MOUNT_FIXTURE_TIMEOUT = 10 * 1000
 
 tape('mount', function (t) {
   const fuse = new Fuse(mnt, {}, { force: true })
@@ -113,8 +114,16 @@ tape('mounting over a broken mountpoint with force succeeds', function (t) {
     const fuse = new Fuse(mnt, {}, { force: true, debug: false })
     fuse.mount(function (err) {
       t.error(err, 'no error')
+      if (err) {
+        return Fuse.unmount(mnt, function (cleanupErr) {
+          t.error(cleanupErr, 'failed recovery leaves no stale test mount')
+          t.end()
+        })
+      }
+
       t.pass('works')
-      unmount(fuse, function () {
+      unmount(fuse, function (unmountErr) {
+        t.error(unmountErr, 'recovered mount unmounts cleanly')
         t.end()
       })
     })
@@ -198,26 +207,100 @@ tape('static unmounting', function (t) {
 })
 
 function createBrokenMountpoint (mnt, cb) {
-  const child = spawnSync(process.execPath, ['-e', `
+  const child = spawn(process.execPath, ['-e', `
     const Fuse = require('..')
     const mnt = ${JSON.stringify(mnt)}
     const fuse = new Fuse(mnt, {}, { force: true, debug: false })
-    fuse.mount(() => {
-      process.exit(0)
+    fuse.mount(err => {
+      if (err) {
+        process.send({
+          type: 'mount-error',
+          code: err.code,
+          message: err.message
+        })
+        return
+      }
+      process.send({
+        type: 'mounted',
+        pid: process.pid
+      })
     })
   `], {
     cwd: __dirname,
-    stdio: 'inherit'
+    stdio: ['ignore', 'inherit', 'inherit', 'ipc']
   })
 
-  if (child.error) return process.nextTick(cb, child.error)
-  if (child.status !== 0) {
-    const err = new Error(`Broken-mount fixture exited with status ${child.status}`)
+  let mounted = false
+  let pendingError = null
+  let completed = false
+  const timeout = setTimeout(function () {
+    const err = new Error('Timed out waiting for the broken-mount fixture to become ready')
     err.code = 'EFUSETESTFIXTURE'
-    return process.nextTick(cb, err)
-  }
+    abort(err)
+  }, BROKEN_MOUNT_FIXTURE_TIMEOUT)
 
-  waitForDisconnectedMount(mnt, cb)
+  child.once('error', function (err) {
+    if (pendingError) return
+    pendingError = err
+  })
+
+  child.on('message', function (message) {
+    if (completed || pendingError) return
+    if (!message || typeof message !== 'object') {
+      const err = new Error('Broken-mount fixture sent an invalid readiness message')
+      err.code = 'EFUSETESTFIXTURE'
+      return abort(err)
+    }
+    if (message.type === 'mount-error') {
+      const err = new Error(message.message || 'Broken-mount fixture failed to mount')
+      err.code = message.code || 'EFUSETESTFIXTURE'
+      return abort(err)
+    }
+    if (message.type !== 'mounted' || message.pid !== child.pid || mounted) {
+      const err = new Error('Broken-mount fixture sent an unexpected readiness message')
+      err.code = 'EFUSETESTFIXTURE'
+      return abort(err)
+    }
+
+    mounted = true
+    if (!child.kill('SIGKILL')) {
+      const err = new Error('Failed to terminate the mounted FUSE fixture')
+      err.code = 'EFUSETESTFIXTURE'
+      return abort(err)
+    }
+  })
+
+  child.once('close', function (code, signal) {
+    clearTimeout(timeout)
+    if (completed) return
+    completed = true
+
+    if (pendingError) return cb(pendingError)
+    if (!mounted) {
+      const err = new Error(`Broken-mount fixture exited before readiness with status ${code}`)
+      err.code = 'EFUSETESTFIXTURE'
+      return cb(err)
+    }
+    if (signal !== 'SIGKILL') {
+      const err = new Error(`Broken-mount fixture exited with unexpected signal ${signal || 'none'}`)
+      err.code = 'EFUSETESTFIXTURE'
+      return cb(err)
+    }
+
+    waitForDisconnectedMount(mnt, cb)
+  })
+
+  function abort (err) {
+    if (completed || pendingError) return
+    pendingError = err
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL')
+      return
+    }
+    clearTimeout(timeout)
+    completed = true
+    process.nextTick(cb, err)
+  }
 }
 
 function waitForDisconnectedMount (mnt, cb) {
@@ -237,8 +320,11 @@ function waitForDisconnectedMount (mnt, cb) {
 
         fs.stat(parent, function (parentErr, parentStat) {
           if (parentErr) return retry(parentErr)
-          // Some kernels remove the dead mount before exposing ENOTCONN.
-          if (mountStat.dev === parentStat.dev) return cb(null)
+          if (mountStat.dev === parentStat.dev) {
+            const err = new Error('Crashed FUSE fixture detached instead of becoming disconnected')
+            err.code = 'EFUSETESTNOTBROKEN'
+            return cb(err)
+          }
           return retry(probeErr)
         })
       })
@@ -251,7 +337,8 @@ function waitForDisconnectedMount (mnt, cb) {
     const err = new Error('Timed out waiting for the crashed FUSE mount to disconnect')
     err.code = 'ETIMEDOUT'
     if (cause) err.cause = cause
-    Fuse.unmount(mnt, function () {
+    Fuse.unmount(mnt, function (cleanupErr) {
+      if (cleanupErr) err.cleanupError = cleanupErr
       cb(err)
     })
   }

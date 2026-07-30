@@ -121,6 +121,9 @@ tape('unmount passes the mountpoint as a literal process argument', function (t)
   childProcess.execFile = function (command, args, options, cb) {
     t.ok(command === 'diskutil' || command === 'fusermount3', 'known unmount executable is selected')
     t.equal(args[args.length - 1], dangerousPath, 'mountpoint remains one literal argument')
+    if (command === 'fusermount3') {
+      t.equal(args[args.length - 2], '--', 'Linux option parsing ends before the mountpoint')
+    }
     t.equal(options.shell, false, 'no shell is involved')
     t.equal(options.timeout, 15000, 'standalone unmount has a finite deadline')
     t.equal(options.killSignal, 'SIGKILL', 'a timed-out helper cannot ignore termination')
@@ -166,6 +169,81 @@ tape('unmount waits until a lazy detach is observable', function (t) {
 
     t.error(err, 'unmount completes after the mount disappears')
     t.equal(mountpointChecks, 5, 'mountpoint must remain detached across stable observations')
+    t.end()
+  })
+})
+
+tape('unmount accepts a helper race only after stable detach is proven', function (t) {
+  const originalExecFile = childProcess.execFile
+  const filesystem = require('fs')
+  const originalStat = filesystem.stat
+  const indexPath = require.resolve('../')
+  const mountpoint = '/tmp/fuse-napi-raced-unmount'
+  const helperError = new Error('Operation not permitted')
+  helperError.code = 'EPERM'
+  let mountpointChecks = 0
+
+  childProcess.execFile = function (command, args, options, cb) {
+    process.nextTick(cb, helperError)
+  }
+  filesystem.stat = function (name, cb) {
+    if (name === mountpoint) mountpointChecks++
+    return process.nextTick(cb, null, { dev: 1 })
+  }
+
+  delete require.cache[indexPath]
+  const IsolatedFuse = require('../')
+  IsolatedFuse.unmount(mountpoint, function (err) {
+    childProcess.execFile = originalExecFile
+    filesystem.stat = originalStat
+    delete require.cache[indexPath]
+
+    t.error(err, 'an unsuccessful helper is idempotent once detach is proven')
+    t.equal(mountpointChecks, 3, 'helper failure requires stable detached observations')
+    t.end()
+  })
+})
+
+tape('unmount preserves helper and observation failures when the mount remains', function (t) {
+  const originalExecFile = childProcess.execFile
+  const filesystem = require('fs')
+  const originalStat = filesystem.stat
+  const originalNow = Date.now
+  const indexPath = require.resolve('../')
+  const mountpoint = '/tmp/fuse-napi-attached-unmount'
+  const helperError = new Error('Operation not permitted')
+  helperError.code = 'EPERM'
+  let clockReads = 0
+
+  childProcess.execFile = function (command, args, options, cb) {
+    process.nextTick(cb, helperError)
+  }
+  filesystem.stat = function (name, cb) {
+    const dev = name === mountpoint ? 2 : 1
+    process.nextTick(cb, null, { dev })
+  }
+  Date.now = function () {
+    return clockReads++ === 0 ? 0 : 15000
+  }
+
+  delete require.cache[indexPath]
+  const IsolatedFuse = require('../')
+  IsolatedFuse.unmount(mountpoint, function (err) {
+    childProcess.execFile = originalExecFile
+    filesystem.stat = originalStat
+    Date.now = originalNow
+    delete require.cache[indexPath]
+
+    t.equal(err && err.code, 'EFUSEUNMOUNT', 'an attached mount has a stable error code')
+    t.equal(err && err.cause, helperError, 'the helper failure is retained as the primary cause')
+    t.equal(err && err.helperError, helperError, 'the helper diagnostic is directly available')
+    t.equal(
+      err && err.observationError && err.observationError.code,
+      'EFUSEUNMOUNTWAIT',
+      'the failed detach observation is retained'
+    )
+    t.equal(err && err.mountpoint, mountpoint, 'the failed mountpoint is identified')
+    t.match(err && err.message, /failed.*did not detach/, 'the failure describes both conditions')
     t.end()
   })
 })

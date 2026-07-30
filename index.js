@@ -560,14 +560,17 @@ class Fuse extends Nanoresource {
     }
 
     const command = IS_OSX ? 'diskutil' : 'fusermount3'
-    const args = IS_OSX ? ['unmount', 'force', mnt] : ['-uz', mnt]
+    const args = IS_OSX ? ['unmount', 'force', mnt] : ['-uz', '--', mnt]
     execFile(command, args, {
       shell: false,
       timeout: DEFAULT_TIMEOUT,
       killSignal: 'SIGKILL'
-    }, err => {
-      if (err) return cb(err)
-      return waitForUnmountedMountpoint(mnt, cb)
+    }, helperError => {
+      return waitForUnmountedMountpoint(mnt, observationError => {
+        if (!observationError) return cb(null)
+        if (!helperError) return cb(observationError)
+        return cb(createUnmountError(mnt, command, helperError, observationError))
+      })
     })
   }
 
@@ -1786,6 +1789,20 @@ function waitForUnmountedMountpoint (mnt, cb) {
     if (lastError) err.cause = lastError
     return cb(err)
   }
+}
+
+function createUnmountError (mnt, command, helperError, observationError) {
+  const mountpoint = path.resolve(mnt)
+  const err = new Error(
+    `${command} failed and FUSE mount ${JSON.stringify(mountpoint)} did not detach`
+  )
+  err.code = 'EFUSEUNMOUNT'
+  err.mountpoint = mountpoint
+  err.command = command
+  err.cause = helperError
+  err.helperError = helperError
+  err.observationError = observationError
+  return err
 }
 
 function isDisconnectedError (err) {
