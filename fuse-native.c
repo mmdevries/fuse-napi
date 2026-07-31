@@ -1477,6 +1477,19 @@ static int fuse_native_truncate_v3 (
   return -ENOSYS;
 }
 
+static size_t fuse_native_readlink_capacity (size_t len) {
+#ifdef __linux__
+  /*
+   * libfuse provides PATH_MAX + 1 bytes here, but the Linux kernel rejects
+   * a FUSE readlink reply with PATH_MAX payload bytes. Reserve one extra
+   * byte so Node-API emits at most the kernel-supported PATH_MAX - 1 bytes.
+   */
+  if (len > 1) return len - 1;
+#endif
+  /* macFUSE accepts PATH_MAX payload bytes and uses the complete capacity. */
+  return len;
+}
+
 FUSE_METHOD(readlink, 1, 1, (const char *path, char *linkname, size_t len), {
   l->path = path;
   l->linkname = linkname;
@@ -1486,9 +1499,10 @@ FUSE_METHOD(readlink, 1, 1, (const char *path, char *linkname, size_t len), {
 }, {
   if (res == 0) {
     size_t linkname_length = 0;
+    size_t linkname_capacity = fuse_native_readlink_capacity(l->len);
     if (l->len == 0 ||
         napi_get_value_string_utf8(
-          env, argv[2], l->linkname, l->len, &linkname_length
+          env, argv[2], l->linkname, linkname_capacity, &linkname_length
         ) != napi_ok) {
       res = -EIO;
     }

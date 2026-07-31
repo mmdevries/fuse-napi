@@ -11,12 +11,13 @@ const stat = require('./fixtures/stat')
 const mnt = createMountpoint()
 
 tape('readlink', function (t) {
-  const readlinkBufferSize = Number(childProcess.execFileSync(
+  const pathMax = Number(childProcess.execFileSync(
     'getconf',
     ['PATH_MAX', mnt],
     { encoding: 'utf8' }
   ).trim())
-  const exactTarget = 'x'.repeat(readlinkBufferSize)
+  // Linux rejects PATH_MAX-byte FUSE readlink replies; macFUSE accepts them.
+  const exactTarget = 'x'.repeat(pathMax - (process.platform === 'linux' ? 1 : 0))
   const longTarget = 'target/'.repeat(10000)
   var ops = {
     readdir: function (path, cb) {

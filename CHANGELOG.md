@@ -9,9 +9,10 @@ All notable changes to this project are documented here. Releases follow
 
 ### Fixed
 
-- Readlink now uses the complete caller-provided buffer capacity, preserving a
-  symlink target of exactly `size - 1` bytes instead of dropping its final byte.
-  The mounted integration suite covers this exact-capacity boundary.
+- Readlink now preserves the largest kernel-supported symlink target without
+  dropping its final byte: `PATH_MAX` bytes on macFUSE and `PATH_MAX - 1` bytes
+  on Linux. The mounted integration suite covers both platform boundaries
+  without producing an oversized Linux FUSE reply.
 
 ### Removed
 
