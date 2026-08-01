@@ -1,6 +1,6 @@
 {
   "name": "fuse-napi",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "description": "Production-grade Node-API bindings for FUSE 3 on Linux and macOS",
   "keywords": [
     "fuse",

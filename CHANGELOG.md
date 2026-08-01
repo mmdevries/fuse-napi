@@ -5,6 +5,14 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
+## 2.2.2 - 2026-08-01
+
+### Fixed
+
+- `maxRead` now configures both the libfuse `max_read` mount option and the
+  matching `fuse_conn_info.max_read` init value, allowing FUSE 3 mounts to
+  initialize successfully while preserving default negotiation when omitted.
+
 ## 2.2.1 - 2026-07-30
 
 ### Fixed
