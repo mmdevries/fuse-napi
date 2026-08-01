@@ -186,6 +186,7 @@ Create a new `Fuse` object.
   force: false,        // Recover a disconnected mount before remounting.
   mkdir: false,        // Create the mountpoint before mounting.
   directIo: false,     // Set fuse_config.direct_io for every opened file.
+  maxRead: 262144,     // Set max_read and the matching init connection limit.
   timeout: 15000,      // Operation and mount-start timeout in milliseconds.
   maxConcurrency: 4,   // Fixed native request-worker count (1 through 64).
   nullPathOk: false,   // Accept null paths for unlinked handle operations.
@@ -307,7 +308,7 @@ Called on filesystem init.
 Enhanced, mutually exclusive alternative to `init`. `connection` is a frozen
 snapshot of the portable FUSE 3 connection fields:
 `protoMajor`, `protoMinor`, `asyncRead`, `maxWrite`, `maxReadahead`,
-`capable`, `want`, `maxBackground`, and `congestionThreshold`.
+`maxRead`, `capable`, `want`, `maxBackground`, and `congestionThreshold`.
 
 The callback may return a conservative configuration containing `maxWrite`,
 `maxReadahead`, `maxBackground`, `congestionThreshold`, `want`, and/or
@@ -316,6 +317,14 @@ Requested limits may not exceed the values supplied by the kernel, `want`
 must be a subset of `capable`, and the congestion threshold may not exceed
 the background-request limit. Omitting the configuration preserves all
 libfuse defaults.
+
+Set `maxRead` through the constructor options. When present, fuse-napi passes
+the same validated unsigned 32-bit value as both `max_read=<n>` and
+`connection.maxRead`; this is required by libfuse 3. It is intentionally not
+an `initWithConfig` result field because changing it after the mount options
+have been processed would make the two libfuse values inconsistent. When the
+option is omitted, fuse-napi leaves `conn->max_read` to libfuse and kernel
+negotiation. The kernel may enforce a lower effective request size.
 
 #### `ops.access(path, mode, cb)`
 

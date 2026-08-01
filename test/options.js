@@ -16,6 +16,15 @@ tape('mount options serialize as single libfuse values', function (t) {
   t.end()
 })
 
+tape('maxRead serializes as the matching libfuse max_read option', function (t) {
+  const fuse = new Fuse('/tmp/fuse-napi-max-read-option', {}, {
+    maxRead: 262144
+  })
+
+  t.equal(fuse._fuseOptions(), '-omax_read=262144')
+  t.end()
+})
+
 tape('zero-valued numeric mount options are preserved', function (t) {
   const fuse = new Fuse('/tmp/fuse-napi-zero-options', {}, {
     maxRead: 0,

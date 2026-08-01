@@ -58,6 +58,8 @@ declare namespace Fuse {
     readonly asyncRead: boolean;
     readonly maxWrite: number;
     readonly maxReadahead: number;
+    /** Active maximum read size; equals the constructor maxRead value when configured. */
+    readonly maxRead: number;
     readonly capable: number;
     readonly want: number;
     readonly maxBackground: number;
@@ -464,6 +466,7 @@ declare namespace Fuse {
     default_permissions?: boolean;
     blkdev?: boolean;
     blksize?: number;
+    /** Unsigned 32-bit maximum passed to both libfuse max_read inputs. */
     maxRead?: number;
     /** Native libfuse spelling for maxRead. */
     max_read?: number;

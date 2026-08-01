@@ -658,7 +658,11 @@ class Fuse extends Nanoresource {
                 self.maxConcurrency,
                 self._operationFlags,
                 self._nativeLoopExited.bind(self),
-                self._nativeMountComplete.bind(self)
+                self._nativeMountComplete.bind(self),
+                self.opts.maxRead !== undefined && self.opts.maxRead !== null,
+                self.opts.maxRead === undefined || self.opts.maxRead === null
+                  ? 0
+                  : self.opts.maxRead
               )
             } catch (err) {
               self._nativeMountPending = false
@@ -711,7 +715,8 @@ class Fuse extends Nanoresource {
     capable,
     want,
     maxBackground,
-    congestionThreshold
+    congestionThreshold,
+    maxRead
   ) {
     const connection = Object.freeze({
       protoMajor,
@@ -722,7 +727,8 @@ class Fuse extends Nanoresource {
       capable,
       want,
       maxBackground,
-      congestionThreshold
+      congestionThreshold,
+      maxRead
     })
     const complete = (err, requested) => {
       if (err) {

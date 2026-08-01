@@ -21,6 +21,7 @@
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdatomic.h>
 
 #if defined(__APPLE__) && defined(__clang__)
@@ -308,6 +309,8 @@ struct fuse_thread_s {
   int mounted;
   int fuse_mounted;
   uint32_t operation_flags;
+  bool max_read_configured;
+  uint32_t configured_max_read;
   int mount_pending;
   int mount_cleanup_pending;
   int mount_error;
@@ -2214,7 +2217,7 @@ static int fuse_native_statx (
 static void fuse_native_dispatch_init (uv_async_t* handle, fuse_thread_locals_t* l, fuse_thread_t* ft) {
   (void) handle;
   FUSE_NATIVE_CALLBACK(ft->handlers[op_init], {
-    napi_value argv[12] = {0};
+    napi_value argv[13] = {0};
 
     if (l->conn == NULL ||
         napi_get_reference_value(env, l->self, &(argv[0])) != napi_ok ||
@@ -2232,13 +2235,14 @@ static void fuse_native_dispatch_init (uv_async_t* handle, fuse_thread_locals_t*
         napi_create_uint32(env, l->conn->want, &(argv[8])) != napi_ok ||
         napi_create_uint32(env, l->conn->max_background, &(argv[9])) != napi_ok ||
         napi_create_uint32(env, l->conn->congestion_threshold, &(argv[10])) != napi_ok ||
-        create_request_context_value(env, l, &(argv[11])) != napi_ok) {
+        napi_create_uint32(env, l->conn->max_read, &(argv[11])) != napi_ok ||
+        create_request_context_value(env, l, &(argv[12])) != napi_ok) {
       napi_close_handle_scope(env, scope);
       fuse_native_complete_local(l, -EIO);
       return;
     }
 
-    FUSE_CALL_CALLBACK(12, argv)
+    FUSE_CALL_CALLBACK(13, argv)
   })
 }
 
@@ -2329,6 +2333,12 @@ static void * fuse_native_init (
     ? NULL
     : (fuse_thread_t *) context->private_data;
   if (ft == NULL) return NULL;
+
+  /*
+   * libfuse requires max_read from fuse_new() and the init hook to match.
+   * Preserve its normal negotiation completely when the option was omitted.
+   */
+  if (ft->max_read_configured) conn->max_read = ft->configured_max_read;
 
   /*
    * FUSE 3 moved the old operation-level null-path flags into fuse_config.
@@ -3208,7 +3218,7 @@ static void fuse_native_mount_after (uv_work_t *request, int status) {
 }
 
 NAPI_METHOD(fuse_native_mount) {
-  NAPI_ARGV(10)
+  NAPI_ARGV(12)
 
   NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 2);
   if (ft_len < sizeof(*ft)) {
@@ -3233,6 +3243,21 @@ NAPI_METHOD(fuse_native_mount) {
     napi_throw_type_error(env, "EINVAL", "Mountpoint and mount options must be strings");
     return NULL;
   }
+
+  uint64_t configured_max_read = 0;
+  if (napi_get_value_bool(env, argv[10], &(ft->max_read_configured)) != napi_ok) {
+    fuse_native_mount_cleanup(ft);
+    napi_throw_type_error(env, "EINVAL", "Configured maxRead presence must be a boolean");
+    return NULL;
+  }
+  if (value_to_uint64(env, argv[11], &configured_max_read) != 0 ||
+      configured_max_read > UINT32_MAX ||
+      (!ft->max_read_configured && configured_max_read != 0)) {
+    fuse_native_mount_cleanup(ft);
+    napi_throw_range_error(env, "EINVAL", "Invalid configured maxRead state");
+    return NULL;
+  }
+  ft->configured_max_read = (uint32_t) configured_max_read;
 
   napi_valuetype loop_exit_type;
   napi_valuetype mount_callback_type;

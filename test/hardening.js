@@ -101,6 +101,13 @@ tape('constructor and mount option inputs are validated', function (t) {
     /force must be a boolean/,
     'boolean options are type checked'
   )
+  for (const value of [-1, 0x100000000, 1.5, NaN, Infinity, '262144']) {
+    t.throws(
+      () => new Fuse('/tmp/fuse-napi-invalid-max-read', {}, { maxRead: value }),
+      /maxRead must be (?:a safe integer|between 0 and 4294967295)/,
+      `invalid maxRead ${String(value)} is rejected before mounting`
+    )
+  }
 
   const fuse = new Fuse('/tmp/fuse-napi-timeouts', {}, {
     timeout: { default: false, read: 10, init: 0 }
@@ -380,6 +387,7 @@ tape('native mount startup is asynchronous, bounded, and cancellable', function 
   }, {
     timeout: { default: false, init: 20 },
     maxConcurrency: 3,
+    maxRead: 262144,
     nullPathOk: true,
     noPath: true,
     directIo: true
@@ -397,6 +405,8 @@ tape('native mount startup is asynchronous, bounded, and cancellable', function 
     t.equal(mountArguments[7], 15, 'FUSE 3 config flags reach the native layer')
     t.equal(typeof mountArguments[8], 'function', 'unexpected loop exit callback is installed')
     t.equal(typeof mountArguments[9], 'function', 'asynchronous mount completion callback is installed')
+    t.equal(mountArguments[10], true, 'explicit maxRead presence reaches the native layer')
+    t.equal(mountArguments[11], 262144, 'the exact maxRead value reaches the native layer')
     t.equal(fuse._nativeMountPending, true, 'state remains retained until native cancellation finishes')
 
     const cancelled = new Error('cancelled')
@@ -404,6 +414,45 @@ tape('native mount startup is asynchronous, bounded, and cancellable', function 
     mountArguments[9](cancelled)
     t.equal(fuse._nativeMountPending, false, 'late native completion releases pending ownership')
     t.equal(fuse._thread, null, 'late native completion releases the native state buffer')
+    t.end()
+  })
+})
+
+tape('omitted maxRead is represented explicitly at the native boundary', function (t) {
+  const filesystem = require('fs')
+  const originalStat = filesystem.stat
+  const originalMount = binding.fuse_native_mount
+  const originalCheckEnvironment = Fuse.checkEnvironment
+  let mountArguments
+
+  filesystem.stat = function (name, cb) {
+    process.nextTick(cb, null, {
+      dev: 1,
+      isDirectory () { return true }
+    })
+  }
+  binding.fuse_native_mount = function (...args) {
+    mountArguments = args
+  }
+  Fuse.checkEnvironment = function (_, cb) {
+    process.nextTick(cb, null, { ok: true, platform: process.platform })
+  }
+
+  const fuse = new Fuse('/tmp/fuse-napi-default-max-read')
+  fuse._open(function () {})
+
+  setImmediate(function () {
+    filesystem.stat = originalStat
+    binding.fuse_native_mount = originalMount
+    Fuse.checkEnvironment = originalCheckEnvironment
+
+    t.equal(fuse._fuseOptions(), '', 'no max_read mount option is serialized')
+    t.equal(mountArguments[10], false, 'native maxRead presence is false')
+    t.equal(mountArguments[11], 0, 'the unused native value has a canonical zero')
+
+    const cancelled = new Error('cancelled')
+    cancelled.code = 'EFUSEMOUNTCANCELLED'
+    mountArguments[9](cancelled)
     t.end()
   })
 })
@@ -590,6 +639,7 @@ tape('enhanced open, create, readdir, and init contracts are lossless', function
       t.ok(Object.isFrozen(connection), 'connection snapshot is immutable')
       t.equal(connection.protoMajor, 7, 'protocol major is exposed')
       t.equal(connection.capable, 0b1111, 'kernel capabilities are exposed')
+      t.equal(connection.maxRead, 262144, 'active maximum read size is exposed')
       cb(0, {
         maxWrite: 65536,
         maxReadahead: 32768,
@@ -616,7 +666,7 @@ tape('enhanced open, create, readdir, and init contracts are lossless', function
   fuse._op_init(function (err, config) {
     t.equal(err, 0, 'validated init configuration succeeds')
     t.deepEqual([...config], [63, 65536, 32768, 8, 4, 3, 0], 'init settings are encoded exactly')
-  }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12)
+  }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12, 262144)
 
   fuse._op_open(function (err, fd, flags) {
     t.equal(err, 0, 'enriched open succeeds')
@@ -674,6 +724,43 @@ tape('enhanced contracts reject unsafe values before the native boundary', funct
     ['open', 'TypeError'],
     ['readdir', 'RangeError']
   ], 'enhanced validation failures are reported with their operation')
+  t.end()
+})
+
+tape('legacy init remains compatible and maxRead is mount-only configuration', function (t) {
+  let legacyCalls = 0
+  const legacy = new Fuse('/tmp/fuse-napi-legacy-init', {
+    init (cb) {
+      legacyCalls++
+      cb(0)
+    }
+  })
+  legacy._waitForMount = () => {}
+
+  legacy._op_init(function (err, config) {
+    t.equal(err, 0, 'legacy init still completes successfully')
+    t.deepEqual([...config], [0, 0, 0, 0, 0, 0, 0], 'legacy init preserves the default configuration')
+  }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12, 262144)
+  t.equal(legacyCalls, 1, 'legacy init is called exactly once')
+
+  const reported = []
+  const enhanced = new Fuse('/tmp/fuse-napi-max-read-init-result', {
+    initWithConfig (connection, cb) {
+      cb(0, { maxRead: connection.maxRead / 2 })
+    }
+  }, {
+    onError (err, operation) {
+      reported.push([operation, err.message])
+    }
+  })
+  enhanced._waitForMount = () => {}
+
+  enhanced._op_init(function (err) {
+    t.equal(err, Fuse.EIO, 'initWithConfig cannot return an independent maxRead')
+  }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12, 262144)
+  t.equal(reported.length, 1, 'the invalid init configuration is reported')
+  t.equal(reported[0][0], 'init', 'the report identifies the init operation')
+  t.match(reported[0][1], /Unknown init configuration property "maxRead"/)
   t.end()
 })
 

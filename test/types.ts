@@ -19,6 +19,8 @@ new Fuse(mountpoint, {
 
 new Fuse(mountpoint, {
   initWithConfig (connection, cb) {
+    const maxRead: number = connection.maxRead
+    void maxRead
     cb(0, {
       maxWrite: connection.maxWrite,
       want: connection.capable,
@@ -103,8 +105,18 @@ new Fuse(mountpoint, {
   }
 }, {
   maxConcurrency: 4,
+  maxRead: 262144,
   nullPathOk: true,
   timeout: { default: 1000, readBuffer: 2000 }
+})
+
+new Fuse(mountpoint, {
+  initWithConfig (connection, cb) {
+    cb(0, {
+      // @ts-expect-error maxRead can only be configured as a mount option
+      maxRead: connection.maxRead
+    })
+  }
 })
 
 // @ts-expect-error init and initWithConfig are mutually exclusive

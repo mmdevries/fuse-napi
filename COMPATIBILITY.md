@@ -12,7 +12,7 @@ The native layer targets the FUSE 3.1 high-level API
 
 | JavaScript callback | Linux libfuse 3 | macFUSE libfuse 3 | Current status and differences |
 | --- | --- | --- | --- |
-| `init(cb)` / `initWithConfig(connection, cb)` | Yes | Yes | Legacy defaults remain unchanged. The enhanced variant exposes and validates the portable FUSE 3 connection fields before applying conservative limits/capabilities. Public mount completion waits until the mounted device is visible. |
+| `init(cb)` / `initWithConfig(connection, cb)` | Yes | Yes | Legacy defaults remain unchanged. The enhanced variant exposes and validates the portable FUSE 3 connection fields, including the active `maxRead`, before applying conservative limits/capabilities. Public mount completion waits until the mounted device is visible. |
 | `access(path, mode, cb)` | Yes | Yes | Shared implementation. Suppressed by `default_permissions`. |
 | `statfs(path, cb)` | Yes | Yes | Shared `struct statvfs` implementation with range-checked 64-bit fields. macFUSE also offers unsupported `statfs_x`. |
 | `getattr(path, cb)` | Yes | Yes | Shared, zero-initialized implementation with range-checked 64-bit fields and platform-specific timestamp members. A null path is routed to `fgetattr`. |
@@ -99,7 +99,7 @@ configurations before libfuse is invoked.
 | `defaultPermissions` | `default_permissions` | Yes | Yes | Boolean in both runtime and TypeScript declarations. |
 | `blkdev` | `blkdev` | Yes | Rejected | Linux-only, privileged, and requires `fsname`. |
 | `blksize` | `blksize=<n>` | Yes | Rejected | Linux-only and requires `blkdev: true`. |
-| `maxRead` | `max_read=<n>` | Yes | Yes | Kernel/library limits can reduce the requested value. |
+| `maxRead` | `max_read=<n>` and matching `conn->max_read` | Yes | Yes | Both libfuse inputs receive the exact validated `uint32_t` value, including zero. When omitted, neither is set by fuse-napi. Configure it only as a constructor option; the kernel may enforce a lower request limit. |
 | `fd` | Rejected | Internal | Internal | libfuse3 owns the FUSE device descriptor. |
 | `userId` | Rejected | Internal | Internal | `fusermount3` owns `user_id`; use `uid` only to override returned ownership. |
 | `fsname` | `fsname=<name>` | Yes | Yes | Finder presentation also depends on `volname`. |
