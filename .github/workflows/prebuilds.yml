@@ -579,12 +579,12 @@ jobs:
           shasum -a 256 fuse-napi-*.tgz fuse-napi-sbom.cdx.json > SHA256SUMS
 
       - name: Attest package build provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: fuse-napi-*.tgz
 
       - name: Attest package SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: fuse-napi-*.tgz
           sbom-path: fuse-napi-sbom.cdx.json
