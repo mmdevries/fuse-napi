@@ -5,14 +5,7 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
-## 2.3.0 - 2026-08-05
-
-### Added
-
-- Portable namespace-cache housekeeping through `fuse.invalidateEntry(path)`,
-  backed by `FUSE_NOTIFY_INVAL_ENTRY`. Nested paths resolve their parent inode,
-  and calls made from filesystem operation callbacks are rejected with
-  `EDEADLK` to prevent Linux reverse-invalidation deadlocks.
+## 2.3.1 - 2026-08-05
 
 ### Fixed
 
@@ -22,6 +15,15 @@ All notable changes to this project are documented here. Releases follow
   disposal, and operation contexts remain guarded until their native response.
 - macOS mounts require and verify macFUSE 5.3.1+, the first release whose
   `FUSE_NOTIFY_INVAL_ENTRY` support reliably removes VFS name-cache entries.
+
+## 2.3.0 - 2026-08-05
+
+### Added
+
+- Portable namespace-cache housekeeping through `fuse.invalidateEntry(path)`,
+  backed by `FUSE_NOTIFY_INVAL_ENTRY`. Nested paths resolve their parent inode,
+  and calls made from filesystem operation callbacks are rejected with
+  `EDEADLK` to prevent Linux reverse-invalidation deadlocks.
 
 ## 2.2.2 - 2026-08-01
 
