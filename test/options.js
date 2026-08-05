@@ -147,6 +147,21 @@ tape('mixed application mount configuration remains compatible', function (t) {
   t.end()
 })
 
+tape('invalidateEntry validates virtual paths before native notification', function (t) {
+  t.plan(3)
+  const fuse = new Fuse('/tmp/fuse-napi-entry-invalidation', {})
+
+  fuse.invalidateEntry('relative', err => {
+    t.match(err && err.message, /absolute/, 'relative paths are rejected')
+  })
+  fuse.invalidateEntry('/', err => {
+    t.match(err && err.message, /root entry/, 'the root cannot be invalidated')
+  })
+  fuse.invalidateEntry('/file', err => {
+    t.equal(err && err.code, 'ENOTCONN', 'a detached filesystem fails deterministically')
+  })
+})
+
 tape('FUSE 3 option conformance failures are deterministic and actionable', function (t) {
   const cases = [
     [{ nonEmpty: true }, 'linux', 'ERR_FUSE_OPTION_REMOVED', ['nonEmpty'], /removed in FUSE 3/],

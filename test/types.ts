@@ -17,6 +17,11 @@ new Fuse(mountpoint, {
   }
 })
 
+const invalidationFuse = new Fuse(mountpoint, {})
+invalidationFuse.invalidateEntry('/file', err => {
+  if (err) throw err
+})
+
 new Fuse(mountpoint, {
   initWithConfig (connection, cb) {
     const maxRead: number = connection.maxRead

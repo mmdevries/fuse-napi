@@ -270,6 +270,30 @@ threads, outstanding JavaScript callbacks, and memory use under load. Mount
 startup runs outside the JavaScript event loop and remains subject to the
 configured `init` deadline.
 
+### Namespace cache housekeeping
+
+Every distinct path resolved by the kernel creates a reachable high-level
+libfuse node until the kernel sends `FORGET`. `release` closes a file handle;
+it does not evict that namespace entry. Filesystems that expose a continuous
+stream of one-shot names can ask the kernel to drop an inactive entry without
+deleting the underlying file:
+
+```js
+fuse.invalidateEntry('/archive/file-123', err => {
+  if (err) console.error(err)
+})
+```
+
+Call `invalidateEntry` only after the client-side `close()` has returned, or
+from an independent housekeeping timer with a safety delay. Never call it
+from `getattr`, `open`, `release`, or another filesystem operation callback;
+the method rejects operation-local calls with `EDEADLK` because Linux reverse
+invalidation can otherwise deadlock with the originating request. The method
+accepts nested paths, resolves the parent node, and sends portable
+`FUSE_NOTIFY_INVAL_ENTRY`. It returns `ENOSYS` if the connected kernel does not
+support the notification. A later access performs a fresh lookup, so choose a
+retention window that balances memory against metadata traffic.
+
 For a larger usage example, see CoCalc's
 [WebSocketFS FUSE integration](https://github.com/sagemathinc/websocketfs/tree/main/lib/fuse).
 

@@ -674,6 +674,11 @@ declare class Fuse {
 
   public mount: (cb: (err?: null | Error) => any) => void;
   public unmount: (cb: (err: null | Error) => any) => void;
+  /**
+   * Invalidate one cached namespace entry without deleting the underlying file.
+   * Must be called outside filesystem operation callbacks.
+   */
+  public invalidateEntry: (path: string, cb?: (err?: null | Error) => any) => void;
   public context: () => Readonly<Fuse.RequestContext> | null;
   public errno: (code?: string) => number;
 

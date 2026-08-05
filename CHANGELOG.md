@@ -5,6 +5,15 @@ All notable changes to this project are documented here. Releases follow
 
 ## Unreleased
 
+## 2.3.0 - 2026-08-05
+
+### Added
+
+- Portable namespace-cache housekeeping through `fuse.invalidateEntry(path)`,
+  backed by `FUSE_NOTIFY_INVAL_ENTRY`. Nested paths resolve their parent inode,
+  and calls made from filesystem operation callbacks are rejected with
+  `EDEADLK` to prevent Linux reverse-invalidation deadlocks.
+
 ## 2.2.2 - 2026-08-01
 
 ### Fixed

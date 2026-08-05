@@ -127,6 +127,11 @@ configurations before libfuse is invoked.
 | `nullPathOk` | `fuse_config.nullpath_ok` | Yes | Yes | Allows `null` paths only when every configured affected operation has its handle-aware counterpart; invalid combinations are rejected in the constructor. |
 | `noPath` | `fuse_config.nullpath_ok` compatibility mapping | Yes | Yes | Retains the 1.x behavior and enforces the same handle-aware callback requirements as `nullPathOk`. |
 
+`fuse.invalidateEntry(path, cb)` uses the portable FUSE notification protocol
+to evict one cached namespace entry without unlinking it. It supports nested
+paths on Linux, must run outside filesystem operation callbacks, and reports
+`ENOSYS` when the connected kernel lacks entry-invalidation support.
+
 Historical native libfuse spellings are normalized before validation:
 `allow_other`, `allow_root`, `auto_unmount`, `default_permissions`,
 `max_read`, `user_id`, `kernel_cache`, `auto_cache`, `direct_io`,

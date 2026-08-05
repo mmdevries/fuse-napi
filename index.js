@@ -44,6 +44,7 @@ const FILE_INFO_KEEP_CACHE = 2
 const FILE_INFO_NONSEEKABLE = 4
 const FILE_INFO_RESULT_FIELDS = new Set(['fd', 'directIO', 'keepCache', 'nonseekable'])
 const requestContexts = new AsyncLocalStorage()
+const activeRequestContexts = new WeakSet()
 const INIT_CONFIG_FIELDS = new Map([
   ['maxWrite', { index: 1, mask: 1, minimum: 1 }],
   ['maxReadahead', { index: 2, mask: 2, minimum: 0 }],
@@ -489,7 +490,8 @@ class Fuse extends Nanoresource {
         const context = extractRequestContext(args)
         const sig = signal.bind(null, nativeHandler)
         const input = [...args]
-        const boundSignal = onceSignal(sig, input)
+        if (context) activeRequestContexts.add(context)
+        const boundSignal = onceSignal(sig, input, context)
         const funcName = `_op_${internalName}`
         if (!self[funcName] || !self._implemented.has(op)) return boundSignal(Fuse.ENOSYS, ...defaults)
         try {
@@ -517,7 +519,7 @@ class Fuse extends Nanoresource {
         return process.nextTick(nativeSignal, ...arr)
       }
 
-      function onceSignal (cb, input) {
+      function onceSignal (cb, input, context) {
         let called = false
         const timeout = to ? setTimeout(signalOnce, to, Fuse.ETIMEDOUT) : null
         signalOnce.cancel = () => failSignal(Fuse.EIO)
@@ -529,6 +531,7 @@ class Fuse extends Nanoresource {
           if (called) return
           called = true
           self._pendingSignals.delete(signalOnce)
+          if (context) activeRequestContexts.delete(context)
 
           if (timeout) clearTimeout(timeout)
 
@@ -1427,6 +1430,58 @@ class Fuse extends Nanoresource {
     return this.close(cb)
   }
 
+  invalidateEntry (entryPath, cb) {
+    if (typeof cb !== 'function') cb = () => {}
+
+    if (activeRequestContexts.has(requestContexts.getStore())) {
+      const err = new Error(
+        'FUSE entry invalidation must run outside a filesystem operation callback'
+      )
+      err.code = 'EDEADLK'
+      return process.nextTick(cb, err)
+    }
+
+    let normalized
+    try {
+      normalized = normalizeInvalidationPath(entryPath)
+    } catch (err) {
+      return process.nextTick(cb, err)
+    }
+
+    if (!this._nativeMounted || !this._thread) {
+      const err = new Error('FUSE filesystem is not mounted')
+      err.code = 'ENOTCONN'
+      return process.nextTick(cb, err)
+    }
+
+    const name = path.posix.basename(normalized)
+    const parentPath = path.posix.dirname(normalized)
+    const notify = parent => {
+      setImmediate(() => {
+        let result
+        try {
+          result = binding.fuse_native_invalidate_entry(this._thread, parent, name)
+        } catch (err) {
+          return cb(err)
+        }
+        if (result === 0 || result === Fuse.ENOENT) return cb(null)
+        const err = new Error(
+          `Failed to invalidate FUSE entry ${JSON.stringify(normalized)}: native result ${result}`
+        )
+        err.code = result === Fuse.ENOSYS ? 'ENOSYS' : 'EFUSEINVALIDATE'
+        err.errno = result
+        cb(err)
+      })
+    }
+
+    if (parentPath === '/') return notify(1)
+    const mountedParent = path.join(this.mnt, parentPath.slice(1))
+    fs.stat(mountedParent, { bigint: true }, (err, stat) => {
+      if (err) return cb(err)
+      notify(stat.ino)
+    })
+  }
+
   context () {
     return requestContexts.getStore() || null
   }
@@ -1845,6 +1900,21 @@ function isDisconnectedError (err) {
     err.errno === Fuse.ENOTCONN ||
     err.errno === Fuse.ENXIO
   )
+}
+
+function normalizeInvalidationPath (entryPath) {
+  if (typeof entryPath !== 'string' || entryPath.length === 0 || entryPath.includes('\0')) {
+    throw new TypeError('FUSE entry path must be a non-empty NUL-free string')
+  }
+  if (!entryPath.startsWith('/')) {
+    throw new TypeError('FUSE entry path must be absolute within the mounted filesystem')
+  }
+  const normalized = path.posix.normalize(entryPath)
+  if (normalized === '/') throw new RangeError('The FUSE root entry cannot be invalidated')
+  if (Buffer.byteLength(path.posix.basename(normalized)) > 255) {
+    throw new RangeError('FUSE entry name must be at most 255 UTF-8 bytes')
+  }
+  return normalized
 }
 
 function normalizeTimeoutOption (timeout) {

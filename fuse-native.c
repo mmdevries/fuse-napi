@@ -3494,6 +3494,59 @@ NAPI_METHOD(fuse_native_unmount) {
   return NULL;
 }
 
+NAPI_METHOD(fuse_native_invalidate_entry) {
+  NAPI_ARGV(3)
+  NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 0);
+  uint64_t parent = 0;
+  size_t name_size = 0;
+
+  if (ft_len < sizeof(*ft) ||
+      value_to_uint64(env, argv[1], &parent) != 0 ||
+      parent == 0 ||
+      napi_get_value_string_utf8(env, argv[2], NULL, 0, &name_size) != napi_ok) {
+    napi_throw_type_error(env, "EINVAL", "Invalid FUSE entry invalidation request");
+    return NULL;
+  }
+
+  char *name = fuse_native_string(env, argv[2]);
+  if (name == NULL) {
+    napi_throw_error(env, "ENOMEM", "Failed to allocate FUSE entry name");
+    return NULL;
+  }
+  size_t name_length = strlen(name);
+  if (name_length == 0 ||
+      name_length != name_size ||
+      name_length > 255 ||
+      strchr(name, '/') != NULL) {
+    free(name);
+    napi_throw_range_error(env, "EINVAL", "FUSE entry name must be one NUL-free path component");
+    return NULL;
+  }
+
+  int result = -ENOTCONN;
+  if (!atomic_load(&(ft->cleanup_requested)) && ft->mutex_initialized) {
+    uv_mutex_lock(&(ft->mut));
+    if (ft->mounted && ft->fuse != NULL) {
+      struct fuse_session *session = fuse_get_session(ft->fuse);
+      result = fuse_lowlevel_notify_inval_entry(
+        session,
+        (fuse_ino_t) parent,
+        name,
+        name_length
+      );
+    }
+    uv_mutex_unlock(&(ft->mut));
+  }
+  free(name);
+
+  napi_value value;
+  if (napi_create_int32(env, result, &value) != napi_ok) {
+    napi_throw_error(env, "EFUSEINVALIDATE", "Failed to report FUSE entry invalidation result");
+    return NULL;
+  }
+  return value;
+}
+
 NAPI_METHOD(fuse_native_notify_poll) {
   NAPI_ARGV(2)
   NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 0);
@@ -3617,6 +3670,7 @@ NAPI_INIT() {
   NAPI_EXPORT_FUNCTION(fuse_native_mount)
   NAPI_EXPORT_FUNCTION(fuse_native_cancel_mount)
   NAPI_EXPORT_FUNCTION(fuse_native_unmount)
+  NAPI_EXPORT_FUNCTION(fuse_native_invalidate_entry)
   NAPI_EXPORT_FUNCTION(fuse_native_notify_poll)
   NAPI_EXPORT_FUNCTION(fuse_native_close_poll)
   NAPI_EXPORT_FUNCTION(fuse_native_runtime_info)
