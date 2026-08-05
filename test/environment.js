@@ -69,7 +69,18 @@ tape('macOS environment preflight verifies the complete runtime', async function
   const report = await checkEnvironment({}, {
     platform: 'darwin',
     exists: name => existing.has(name),
-    run: async () => ({ stdout: '3.18.2\n', stderr: '' }),
+    run: async (command, args) => {
+      if (command === '/usr/bin/plutil') {
+        t.deepEqual(args, [
+          '-extract',
+          'CFBundleShortVersionString',
+          'raw',
+          '/Library/Filesystems/macfuse.fs/Contents/Info.plist'
+        ], 'the installed macFUSE product version is read without a shell')
+        return { stdout: '5.3.1\n', stderr: '' }
+      }
+      return { stdout: '3.18.2\n', stderr: '' }
+    },
     nativeRuntime: {
       version: '3.18.2',
       apiVersion: 318,
@@ -78,8 +89,33 @@ tape('macOS environment preflight verifies the complete runtime', async function
   })
 
   t.equal(report.ok, true, 'a complete macFUSE runtime is accepted')
+  t.equal(report.macfuseVersion, '5.3.1', 'the supported macFUSE boundary is reported')
   t.equal(report.libfuseVersion, '3.18.2', 'the detected version is reported')
   t.equal(report.capabilities.statx, false, 'unsupported macOS statx is explicit')
+  t.end()
+})
+
+tape('macOS environment preflight rejects macFUSE before 5.3.1', async function (t) {
+  try {
+    await checkEnvironment({}, {
+      platform: 'darwin',
+      exists: () => true,
+      run: async command => ({
+        stdout: command === '/usr/bin/plutil' ? '5.3.0\n' : '3.18.2\n',
+        stderr: ''
+      }),
+      nativeRuntime: {
+        version: '3.18.2',
+        apiVersion: 318,
+        hasBufferRelease: true
+      }
+    })
+    t.fail('macFUSE 5.3.0 was accepted')
+  } catch (err) {
+    t.equal(err.code, 'EMACFUSEVERSION', 'the product-version failure has a stable code')
+    t.match(err.message, /5\.3\.1 or newer/, 'the supported macFUSE floor is actionable')
+    t.match(err.message, /5\.3\.0/, 'the installed version is included')
+  }
   t.end()
 })
 

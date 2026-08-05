@@ -65,7 +65,7 @@ function discover (
     }
 
     throw new Error(
-      'macFUSE 5 with its libfuse3 headers is required to build fuse-napi on macOS. ' +
+      'macFUSE 5.3.1 or newer with its libfuse3 headers is required to build fuse-napi on macOS. ' +
       `Install macFUSE from ${MACFUSE_URL}; fuse-napi does not download or install it.`
     )
   }

@@ -852,6 +852,65 @@ tape('request context is immutable and isolated across asynchronous handlers', f
   t.equal(fuse.context(), null, 'context is unavailable outside an operation')
 })
 
+tape('request context remains protected until the native response is delivered', function (t) {
+  const originalSignal = binding.fuse_native_signal_access
+  const originalInvalidate = binding.fuse_native_invalidate_entry
+  let nativeSignals = 0
+  let nativeInvalidations = 0
+  let fuse
+
+  binding.fuse_native_signal_access = function (nativeHandler, result) {
+    nativeSignals++
+    t.equal(result, 0, 'the filesystem response is still delivered')
+  }
+  binding.fuse_native_invalidate_entry = function () {
+    nativeInvalidations++
+  }
+
+  fuse = new Fuse('/tmp/fuse-napi-context-invalidation', {
+    access (name, mode, cb) {
+      cb(0)
+      fuse.invalidateEntry('/file', err => {
+        binding.fuse_native_signal_access = originalSignal
+        binding.fuse_native_invalidate_entry = originalInvalidate
+        t.equal(err && err.code, 'EDEADLK', 'post-callback invalidation is still operation-local')
+        t.equal(nativeSignals, 1, 'one native operation response is sent')
+        t.equal(nativeInvalidations, 0, 'the unsafe native invalidation is never queued')
+        t.end()
+      })
+    }
+  })
+  fuse._nativeMounted = true
+  fuse._thread = Buffer.alloc(8)
+  fuse._handlers[binding.op_access]({}, binding.op_access, '/file', 0, new Uint32Array(11))
+})
+
+tape('entry invalidation preserves asynchronous errno callbacks at the native boundary', function (t) {
+  t.plan(7)
+  const originalInvalidate = binding.fuse_native_invalidate_entry
+  const fuse = new Fuse('/tmp/fuse-napi-native-invalidation')
+  const thread = Buffer.alloc(8)
+  let synchronous = true
+
+  fuse._nativeMounted = true
+  fuse._thread = thread
+  binding.fuse_native_invalidate_entry = function (receivedThread, parent, name, cb) {
+    t.equal(receivedThread, thread, 'the retained mount state reaches native code')
+    t.equal(parent, 1, 'a root child uses the FUSE root inode')
+    t.equal(name, 'file', 'one validated path component is sent')
+    t.equal(typeof cb, 'function', 'native completion uses a callback')
+    cb(Fuse.EAGAIN)
+  }
+
+  fuse.invalidateEntry('/file', err => {
+    binding.fuse_native_invalidate_entry = originalInvalidate
+    t.equal(synchronous, false, 'even a synchronous binding completion is deferred')
+    t.equal(err && err.code, 'EAGAIN', 'native backpressure retains its errno code')
+    t.equal(err && err.errno, Fuse.EAGAIN, 'the signed native errno is retained')
+  })
+  synchronous = false
+})
+
 tape('timespec input preserves nanoseconds and special utimens values', function (t) {
   const calls = []
   const fuse = new Fuse('/tmp/fuse-napi-timespec', {

@@ -488,7 +488,7 @@ class Fuse extends Nanoresource {
 
       return function (nativeHandler, opCode, ...args) {
         const context = extractRequestContext(args)
-        const sig = signal.bind(null, nativeHandler)
+        const sig = signal.bind(null, nativeHandler, context)
         const input = [...args]
         if (context) activeRequestContexts.add(context)
         const boundSignal = onceSignal(sig, input, context)
@@ -507,7 +507,7 @@ class Fuse extends Nanoresource {
         }
       }
 
-      function signal (nativeHandler, result, ...args) {
+      function signal (nativeHandler, context, result, ...args) {
         result = normalizeResult(result, name)
         var arr = [nativeHandler, result, ...args]
 
@@ -516,7 +516,13 @@ class Fuse extends Nanoresource {
           if (arr.length === 2) arr = arr.concat(defaults)
         }
 
-        return process.nextTick(nativeSignal, ...arr)
+        return process.nextTick(() => {
+          try {
+            nativeSignal(...arr)
+          } finally {
+            if (context) activeRequestContexts.delete(context)
+          }
+        })
       }
 
       function onceSignal (cb, input, context) {
@@ -531,8 +537,6 @@ class Fuse extends Nanoresource {
           if (called) return
           called = true
           self._pendingSignals.delete(signalOnce)
-          if (context) activeRequestContexts.delete(context)
-
           if (timeout) clearTimeout(timeout)
 
           cb(err, ...args)
@@ -1454,24 +1458,35 @@ class Fuse extends Nanoresource {
       return process.nextTick(cb, err)
     }
 
+    const thread = this._thread
     const name = path.posix.basename(normalized)
     const parentPath = path.posix.dirname(normalized)
     const notify = parent => {
-      setImmediate(() => {
-        let result
-        try {
-          result = binding.fuse_native_invalidate_entry(this._thread, parent, name)
-        } catch (err) {
-          return cb(err)
-        }
+      let called = false
+      let synchronous = true
+      const complete = result => {
+        if (called) return
+        called = true
         if (result === 0 || result === Fuse.ENOENT) return cb(null)
         const err = new Error(
           `Failed to invalidate FUSE entry ${JSON.stringify(normalized)}: native result ${result}`
         )
-        err.code = result === Fuse.ENOSYS ? 'ENOSYS' : 'EFUSEINVALIDATE'
+        err.code = invalidationErrorCode(result)
         err.errno = result
         cb(err)
-      })
+      }
+      const completed = result => {
+        if (synchronous) return process.nextTick(complete, result)
+        complete(result)
+      }
+      try {
+        binding.fuse_native_invalidate_entry(thread, parent, name, completed)
+      } catch (err) {
+        called = true
+        return process.nextTick(cb, err)
+      } finally {
+        synchronous = false
+      }
     }
 
     if (parentPath === '/') return notify(1)
@@ -1915,6 +1930,13 @@ function normalizeInvalidationPath (entryPath) {
     throw new RangeError('FUSE entry name must be at most 255 UTF-8 bytes')
   }
   return normalized
+}
+
+function invalidationErrorCode (result) {
+  for (const [code, errno] of Object.entries(os.constants.errno)) {
+    if (result === -errno) return code
+  }
+  return 'EFUSEINVALIDATE'
 }
 
 function normalizeTimeoutOption (timeout) {

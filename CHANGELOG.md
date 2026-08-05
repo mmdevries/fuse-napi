@@ -14,6 +14,15 @@ All notable changes to this project are documented here. Releases follow
   and calls made from filesystem operation callbacks are rejected with
   `EDEADLK` to prevent Linux reverse-invalidation deadlocks.
 
+### Fixed
+
+- Entry invalidations run on a bounded, dedicated native worker, preventing
+  reverse-invalidation kernel locks from blocking the JavaScript event loop or
+  libuv worker pool. Teardown drains the queue without racing native mount
+  disposal, and operation contexts remain guarded until their native response.
+- macOS mounts require and verify macFUSE 5.3.1+, the first release whose
+  `FUSE_NOTIFY_INVAL_ENTRY` support reliably removes VFS name-cache entries.
+
 ## 2.2.2 - 2026-08-01
 
 ### Fixed

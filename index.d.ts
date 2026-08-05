@@ -82,6 +82,7 @@ declare namespace Fuse {
     readonly helperVersion?: string | null;
     readonly device?: '/dev/fuse';
     readonly runtime?: string;
+    readonly macfuseVersion?: string;
     readonly libfuseVersion?: string | null;
     readonly capabilities: Readonly<{
       statx: boolean;
@@ -677,6 +678,7 @@ declare class Fuse {
   /**
    * Invalidate one cached namespace entry without deleting the underlying file.
    * Must be called outside filesystem operation callbacks.
+   * Returns EAGAIN through the callback when the bounded native queue is full.
    */
   public invalidateEntry: (path: string, cb?: (err?: null | Error) => any) => void;
   public context: () => Readonly<Fuse.RequestContext> | null;

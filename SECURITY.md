@@ -9,7 +9,8 @@
 | 0.0.x | — | No |
 
 The latest `2.x` release is the actively supported line. Users should also
-keep their operating-system libfuse 3 or macFUSE 5 runtime current.
+keep their operating-system libfuse 3 or supported macFUSE 5.3.1+ runtime
+current.
 
 ## Reporting a vulnerability
 
@@ -37,7 +38,7 @@ filesystem implementation. Applications remain responsible for authorization,
 path policy, data validation, secrets, and safe use of options such as
 `allowOther`, `allowRoot`, and `defaultPermissions`.
 
-The package dynamically links the host's libfuse 3 or macFUSE 5 runtime.
+The package dynamically links the host's libfuse 3 or macFUSE 5.3.1+ runtime.
 Vulnerabilities in libfuse, macFUSE, the kernel extension, or the operating
 system should also be reported to their respective maintainers.
 

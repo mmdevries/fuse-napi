@@ -153,8 +153,9 @@ Conformance failures are `TypeError` instances with one of these stable codes:
 
 ### macFUSE backend options
 
-macFUSE 5 defaults to its VFS/kernel-extension backend. Its public libfuse API
-also accepts `backend=fskit` on supported macOS versions. `fuse-napi` does not
+The supported macFUSE 5.3.1+ runtime defaults to its VFS/kernel-extension
+backend. Its public libfuse API also accepts `backend=fskit` on supported macOS
+versions. `fuse-napi` does not
 currently expose a dedicated backend option.
 
 The current implementation targets the VFS backend because it preserves the broadest

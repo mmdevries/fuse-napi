@@ -74,6 +74,7 @@ typedef struct fuse_thread_s fuse_thread_t;
 typedef struct fuse_thread_locals_s fuse_thread_locals_t;
 typedef struct fuse_worker_s fuse_worker_t;
 typedef struct fuse_poll_registration_s fuse_poll_registration_t;
+typedef struct fuse_invalidation_request_s fuse_invalidation_request_t;
 #if defined(__APPLE__) && FUSE_DARWIN_ENABLE_EXTENSIONS
 typedef fuse_darwin_fill_dir_t fuse_native_fill_dir_t;
 #else
@@ -275,6 +276,7 @@ static const uint32_t op_copy_file_range = 43;
 static const uint32_t op_lseek = 44;
 #define FUSE_OPERATION_COUNT 45
 #define FUSE_MAX_WORKERS 64
+#define FUSE_MAX_PENDING_INVALIDATIONS 1024
 #define FUSE_OPERATION_FLAG_NULL_PATH_OK 1U
 #define FUSE_OPERATION_FLAG_NO_PATH 2U
 #define FUSE_OPERATION_FLAG_UTIME_OMIT_OK 4U
@@ -319,12 +321,18 @@ struct fuse_thread_s {
   int mutex_initialized;
   int workers_sem_initialized;
   int loop_exit_async_initialized;
+  int invalidation_mutex_initialized;
+  int invalidation_cond_initialized;
+  int invalidation_thread_started;
+  int invalidation_active;
+  int invalidation_stopping;
   atomic_int cleanup_scheduled;
   atomic_int cleanup_requested;
   atomic_int mount_cancelled;
   int env_cleanup;
   int cleanup_error;
   int cleanup_thread_joined;
+  int cleanup_invalidation_thread_joined;
   int fuse_cache_cleanup_started;
   atomic_int loop_result;
   size_t max_workers;
@@ -333,6 +341,9 @@ struct fuse_thread_s {
   fuse_thread_locals_t *locals;
   fuse_worker_t *workers;
   fuse_poll_registration_t *polls;
+  fuse_invalidation_request_t *invalidation_head;
+  fuse_invalidation_request_t *invalidation_tail;
+  size_t invalidation_pending;
   uint64_t next_poll_id;
   napi_async_cleanup_hook_handle cleanup_hook;
 #ifdef __APPLE__
@@ -341,9 +352,21 @@ struct fuse_thread_s {
 
   uv_async_t loop_exit_async;
   uv_mutex_t mut;
+  uv_mutex_t invalidation_mut;
+  uv_cond_t invalidation_cond;
+  pthread_t invalidation_thread;
   uv_sem_t workers_finished;
   uv_work_t cleanup_work;
   uv_work_t mount_work;
+};
+
+struct fuse_invalidation_request_s {
+  napi_threadsafe_function callback;
+  fuse_invalidation_request_t *next;
+  char *name;
+  uint64_t parent;
+  size_t name_length;
+  int32_t result;
 };
 
 struct fuse_worker_s {
@@ -437,6 +460,113 @@ static void fuse_native_complete_local (fuse_thread_locals_t *l, int32_t result)
     l->res = result;
     uv_sem_post(&(l->sem));
   }
+}
+
+static void fuse_native_invalidation_finalize (
+  napi_env env,
+  void *finalize_data,
+  void *finalize_hint
+) {
+  (void) env;
+  (void) finalize_hint;
+  fuse_invalidation_request_t *request = (fuse_invalidation_request_t *) finalize_data;
+  free(request->name);
+  free(request);
+}
+
+static void fuse_native_invalidation_dispatch (
+  napi_env env,
+  napi_value callback,
+  void *context,
+  void *data
+) {
+  (void) context;
+  if (env == NULL || callback == NULL || data == NULL) return;
+
+  fuse_invalidation_request_t *request = (fuse_invalidation_request_t *) data;
+  napi_value global;
+  napi_value result;
+  if (napi_get_global(env, &global) != napi_ok ||
+      napi_create_int32(env, request->result, &result) != napi_ok) {
+    return;
+  }
+
+  napi_status status = napi_call_function(env, global, callback, 1, &result, NULL);
+  if (status == napi_pending_exception) {
+    napi_value exception;
+    if (napi_get_and_clear_last_exception(env, &exception) == napi_ok) {
+      napi_fatal_exception(env, exception);
+    }
+  }
+}
+
+static void fuse_native_complete_invalidation (
+  fuse_invalidation_request_t *request,
+  int32_t result
+) {
+  request->result = result;
+  napi_status status = napi_call_threadsafe_function(
+    request->callback,
+    request,
+    napi_tsfn_nonblocking
+  );
+  napi_release_threadsafe_function(
+    request->callback,
+    status == napi_ok ? napi_tsfn_release : napi_tsfn_abort
+  );
+}
+
+static void* fuse_native_invalidation_worker (void *data) {
+  fuse_thread_t *ft = (fuse_thread_t *) data;
+
+  while (true) {
+    uv_mutex_lock(&(ft->invalidation_mut));
+    while (ft->invalidation_head == NULL &&
+           !atomic_load(&(ft->cleanup_requested))) {
+      uv_cond_wait(&(ft->invalidation_cond), &(ft->invalidation_mut));
+    }
+
+    if (ft->invalidation_head == NULL &&
+        atomic_load(&(ft->cleanup_requested))) {
+      uv_mutex_unlock(&(ft->invalidation_mut));
+      break;
+    }
+
+    fuse_invalidation_request_t *request = ft->invalidation_head;
+    ft->invalidation_head = request->next;
+    if (ft->invalidation_head == NULL) ft->invalidation_tail = NULL;
+    request->next = NULL;
+    if (ft->invalidation_pending > 0) ft->invalidation_pending--;
+    uv_mutex_unlock(&(ft->invalidation_mut));
+
+    int32_t result = -ENOTCONN;
+    struct fuse_session *session = NULL;
+    uv_mutex_lock(&(ft->invalidation_mut));
+    if (!atomic_load(&(ft->cleanup_requested)) &&
+        !ft->invalidation_stopping &&
+        ft->mounted &&
+        ft->fuse != NULL) {
+      session = fuse_get_session(ft->fuse);
+      ft->invalidation_active = session != NULL;
+    }
+    uv_mutex_unlock(&(ft->invalidation_mut));
+
+    if (session != NULL) {
+      result = fuse_lowlevel_notify_inval_entry(
+        session,
+        (fuse_ino_t) request->parent,
+        request->name,
+        request->name_length
+      );
+      uv_mutex_lock(&(ft->invalidation_mut));
+      ft->invalidation_active = 0;
+      uv_cond_broadcast(&(ft->invalidation_cond));
+      uv_mutex_unlock(&(ft->invalidation_mut));
+    }
+    fuse_native_complete_invalidation(request, result);
+  }
+
+  return NULL;
 }
 
 static void fuse_native_release_local_payload (fuse_thread_locals_t *l) {
@@ -2626,12 +2756,22 @@ static void* start_fuse_thread (void *data) {
   }
 
   fuse_native_close_all_polls(ft);
+  if (ft->invalidation_mutex_initialized && ft->invalidation_cond_initialized) {
+    uv_mutex_lock(&(ft->invalidation_mut));
+    ft->invalidation_stopping = 1;
+    while (ft->invalidation_active) {
+      uv_cond_wait(&(ft->invalidation_cond), &(ft->invalidation_mut));
+    }
+  }
   uv_mutex_lock(&(ft->mut));
   struct fuse *fuse = ft->fuse;
   int mounted = ft->fuse_mounted;
   ft->fuse = NULL;
   ft->fuse_mounted = 0;
   uv_mutex_unlock(&(ft->mut));
+  if (ft->invalidation_mutex_initialized && ft->invalidation_cond_initialized) {
+    uv_mutex_unlock(&(ft->invalidation_mut));
+  }
   free(workers);
 
   fuse_native_dispose_mount(fuse, mounted);
@@ -2783,6 +2923,14 @@ static void fuse_native_mount_cleanup (fuse_thread_t *ft) {
   if (ft->workers_sem_initialized) {
     uv_sem_destroy(&(ft->workers_finished));
     ft->workers_sem_initialized = 0;
+  }
+  if (ft->invalidation_cond_initialized) {
+    uv_cond_destroy(&(ft->invalidation_cond));
+    ft->invalidation_cond_initialized = 0;
+  }
+  if (ft->invalidation_mutex_initialized) {
+    uv_mutex_destroy(&(ft->invalidation_mut));
+    ft->invalidation_mutex_initialized = 0;
   }
   if (ft->mutex_initialized) {
     uv_mutex_destroy(&(ft->mut));
@@ -2971,6 +3119,34 @@ static void fuse_native_finish_cleanup (fuse_thread_t *ft) {
 
 static void fuse_native_cleanup_work (uv_work_t *request) {
   fuse_thread_t *ft = (fuse_thread_t *) request->data;
+
+  if (ft->invalidation_mutex_initialized && ft->invalidation_cond_initialized) {
+    uv_mutex_lock(&(ft->invalidation_mut));
+    ft->invalidation_stopping = 1;
+    while (ft->invalidation_active) {
+      uv_cond_wait(&(ft->invalidation_cond), &(ft->invalidation_mut));
+    }
+    uv_mutex_unlock(&(ft->invalidation_mut));
+  }
+
+  if (ft->mutex_initialized) {
+    uv_mutex_lock(&(ft->mut));
+    if (ft->fuse != NULL) fuse_exit(ft->fuse);
+    if (ft->workers != NULL) fuse_native_cancel_workers_locked(ft);
+    uv_mutex_unlock(&(ft->mut));
+  }
+
+  ft->cleanup_invalidation_thread_joined = !ft->invalidation_thread_started;
+  if (ft->invalidation_thread_started) {
+    int err = pthread_join(ft->invalidation_thread, NULL);
+    if (err != 0) {
+      ft->cleanup_error = err;
+      return;
+    }
+    ft->cleanup_invalidation_thread_joined = 1;
+    ft->invalidation_thread_started = 0;
+  }
+
   ft->cleanup_thread_joined = !ft->thread_started;
   if (ft->thread_started) {
     int err = pthread_join(ft->thread, NULL);
@@ -2996,6 +3172,14 @@ static void fuse_native_cleanup_work (uv_work_t *request) {
     if (err != 0 && ft->cleanup_error == 0) ft->cleanup_error = err;
     ft->attr_initialized = 0;
   }
+  if (ft->invalidation_cond_initialized) {
+    uv_cond_destroy(&(ft->invalidation_cond));
+    ft->invalidation_cond_initialized = 0;
+  }
+  if (ft->invalidation_mutex_initialized) {
+    uv_mutex_destroy(&(ft->invalidation_mut));
+    ft->invalidation_mutex_initialized = 0;
+  }
   if (ft->mutex_initialized) {
     uv_mutex_destroy(&(ft->mut));
     ft->mutex_initialized = 0;
@@ -3007,8 +3191,9 @@ static void fuse_native_cleanup_after (uv_work_t *request, int status) {
   if (status < 0) {
     if (ft->cleanup_error == 0) ft->cleanup_error = EIO;
     ft->cleanup_thread_joined = 0;
+    ft->cleanup_invalidation_thread_joined = 0;
   }
-  if (!ft->cleanup_thread_joined) {
+  if (!ft->cleanup_thread_joined || !ft->cleanup_invalidation_thread_joined) {
     fuse_native_report_cleanup_failure(ft);
     return;
   }
@@ -3048,18 +3233,22 @@ static int fuse_native_begin_cleanup (fuse_thread_t *ft, int env_cleanup) {
   ft->env_cleanup = env_cleanup;
   ft->cleanup_error = 0;
   ft->cleanup_thread_joined = 0;
-
-  if (ft->mutex_initialized) {
-    uv_mutex_lock(&(ft->mut));
-    if (ft->fuse != NULL) fuse_exit(ft->fuse);
-    if (ft->workers != NULL) fuse_native_cancel_workers_locked(ft);
-    uv_mutex_unlock(&(ft->mut));
-  }
+  ft->cleanup_invalidation_thread_joined = 0;
 
   for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
-    if (l->op != op_destroy) fuse_native_complete_local(l, -EIO);
+    if (l->op != op_destroy && l->op != op_poll) {
+      fuse_native_complete_local(l, -EIO);
+    }
   }
-  fuse_native_close_all_polls(ft);
+  for (fuse_thread_locals_t *l = ft->locals; l != NULL; l = l->next) {
+    if (l->op == op_poll) fuse_native_complete_local(l, -EIO);
+  }
+
+  if (ft->invalidation_mutex_initialized && ft->invalidation_cond_initialized) {
+    uv_mutex_lock(&(ft->invalidation_mut));
+    uv_cond_broadcast(&(ft->invalidation_cond));
+    uv_mutex_unlock(&(ft->invalidation_mut));
+  }
 
   ft->cleanup_work.data = ft;
   int err = uv_queue_work(ft->loop, &(ft->cleanup_work), fuse_native_cleanup_work, fuse_native_cleanup_after);
@@ -3416,6 +3605,14 @@ NAPI_METHOD(fuse_native_mount) {
   if (err < 0) goto mount_failed;
   ft->mutex_initialized = 1;
 
+  err = uv_mutex_init(&(ft->invalidation_mut));
+  if (err < 0) goto mount_failed;
+  ft->invalidation_mutex_initialized = 1;
+
+  err = uv_cond_init(&(ft->invalidation_cond));
+  if (err < 0) goto mount_failed;
+  ft->invalidation_cond_initialized = 1;
+
   err = uv_sem_init(&(ft->workers_finished), 0);
   if (err < 0) goto mount_failed;
   ft->workers_sem_initialized = 1;
@@ -3495,56 +3692,118 @@ NAPI_METHOD(fuse_native_unmount) {
 }
 
 NAPI_METHOD(fuse_native_invalidate_entry) {
-  NAPI_ARGV(3)
+  NAPI_ARGV(4)
   NAPI_ARGV_BUFFER_CAST(fuse_thread_t *, ft, 0);
   uint64_t parent = 0;
   size_t name_size = 0;
+  napi_valuetype callback_type;
 
   if (ft_len < sizeof(*ft) ||
       value_to_uint64(env, argv[1], &parent) != 0 ||
       parent == 0 ||
-      napi_get_value_string_utf8(env, argv[2], NULL, 0, &name_size) != napi_ok) {
+      napi_get_value_string_utf8(env, argv[2], NULL, 0, &name_size) != napi_ok ||
+      napi_typeof(env, argv[3], &callback_type) != napi_ok ||
+      callback_type != napi_function) {
     napi_throw_type_error(env, "EINVAL", "Invalid FUSE entry invalidation request");
     return NULL;
   }
 
-  char *name = fuse_native_string(env, argv[2]);
-  if (name == NULL) {
+  fuse_invalidation_request_t *request = calloc(1, sizeof(*request));
+  if (request == NULL) {
+    napi_throw_error(env, "ENOMEM", "Failed to allocate FUSE invalidation request");
+    return NULL;
+  }
+  request->name = fuse_native_string(env, argv[2]);
+  if (request->name == NULL) {
+    free(request);
     napi_throw_error(env, "ENOMEM", "Failed to allocate FUSE entry name");
     return NULL;
   }
-  size_t name_length = strlen(name);
-  if (name_length == 0 ||
-      name_length != name_size ||
-      name_length > 255 ||
-      strchr(name, '/') != NULL) {
-    free(name);
+  request->name_length = strlen(request->name);
+  request->parent = parent;
+  if (request->name_length == 0 ||
+      request->name_length != name_size ||
+      request->name_length > 255 ||
+      strchr(request->name, '/') != NULL) {
+    free(request->name);
+    free(request);
     napi_throw_range_error(env, "EINVAL", "FUSE entry name must be one NUL-free path component");
     return NULL;
   }
 
-  int result = -ENOTCONN;
-  if (!atomic_load(&(ft->cleanup_requested)) && ft->mutex_initialized) {
-    uv_mutex_lock(&(ft->mut));
-    if (ft->mounted && ft->fuse != NULL) {
-      struct fuse_session *session = fuse_get_session(ft->fuse);
-      result = fuse_lowlevel_notify_inval_entry(
-        session,
-        (fuse_ino_t) parent,
-        name,
-        name_length
-      );
-    }
-    uv_mutex_unlock(&(ft->mut));
-  }
-  free(name);
-
-  napi_value value;
-  if (napi_create_int32(env, result, &value) != napi_ok) {
-    napi_throw_error(env, "EFUSEINVALIDATE", "Failed to report FUSE entry invalidation result");
+  napi_value resource_name;
+  if (napi_create_string_utf8(
+        env,
+        "fuse-napi:invalidate-entry",
+        NAPI_AUTO_LENGTH,
+        &resource_name
+      ) != napi_ok ||
+      napi_create_threadsafe_function(
+        env,
+        argv[3],
+        NULL,
+        resource_name,
+        1,
+        1,
+        request,
+        fuse_native_invalidation_finalize,
+        NULL,
+        fuse_native_invalidation_dispatch,
+        &(request->callback)
+      ) != napi_ok) {
+    free(request->name);
+    free(request);
+    napi_throw_error(env, "EFUSEINVALIDATE", "Failed to retain the invalidation callback");
     return NULL;
   }
-  return value;
+
+  int32_t result = 0;
+  bool queued = false;
+  if (!ft->mounted ||
+      atomic_load(&(ft->cleanup_requested)) ||
+      !ft->invalidation_mutex_initialized ||
+      !ft->invalidation_cond_initialized ||
+      !ft->attr_initialized) {
+    result = -ENOTCONN;
+  } else {
+    uv_mutex_lock(&(ft->invalidation_mut));
+    if (!ft->mounted ||
+        atomic_load(&(ft->cleanup_requested)) ||
+        ft->invalidation_stopping) {
+      result = -ENOTCONN;
+    } else if (ft->invalidation_pending >= FUSE_MAX_PENDING_INVALIDATIONS) {
+      result = -EAGAIN;
+    } else {
+      if (!ft->invalidation_thread_started) {
+        int err = pthread_create(
+          &(ft->invalidation_thread),
+          &(ft->attr),
+          fuse_native_invalidation_worker,
+          ft
+        );
+        if (err != 0) {
+          result = -err;
+        } else {
+          ft->invalidation_thread_started = 1;
+        }
+      }
+      if (result == 0) {
+        if (ft->invalidation_tail == NULL) {
+          ft->invalidation_head = request;
+        } else {
+          ft->invalidation_tail->next = request;
+        }
+        ft->invalidation_tail = request;
+        ft->invalidation_pending++;
+        queued = true;
+        uv_cond_signal(&(ft->invalidation_cond));
+      }
+    }
+    uv_mutex_unlock(&(ft->invalidation_mut));
+  }
+
+  if (!queued) fuse_native_complete_invalidation(request, result);
+  return NULL;
 }
 
 NAPI_METHOD(fuse_native_notify_poll) {

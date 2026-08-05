@@ -35,7 +35,7 @@ Neither libfuse nor macFUSE is bundled or installed by this package. See
 | --- | --- | --- | --- |
 | Linux | glibc 2.31 and libfuse 3.10.3+ | x86-64, arm64 | 22, 24, 26 |
 | Alpine Linux | Alpine 3.23 and libfuse 3.17.3+ (musl) | x86-64, arm64 | 22, 24, 26 |
-| macOS | macOS 12 and macFUSE 5 with libfuse 3 | Intel x86-64, Apple Silicon arm64 | 22, 24, 26 |
+| macOS | macOS 12 and macFUSE 5.3.1+ with libfuse 3 | Intel x86-64, Apple Silicon arm64 | 22, 24, 26 |
 
 Release prebuilds are compiled on a glibc 2.31 Linux baseline, Alpine 3.23 for
 musl, and with `MACOSX_DEPLOYMENT_TARGET=12.0`. Musl binaries carry an explicit
@@ -81,8 +81,9 @@ No privileged package configuration command is installed or run. Host FUSE
 installation and system-extension approval remain explicit administrator
 tasks.
 
-`fuse-napi` uses macFUSE's libfuse 3 compatibility API and its default VFS
-backend. The public custom-loop API returns transport-owned buffers, while
+`fuse-napi` requires macFUSE 5.3.1 or newer and verifies the installed product
+version before every mount. It uses macFUSE's libfuse 3 compatibility API and
+its default VFS backend. The public custom-loop API returns transport-owned buffers, while
 current macFUSE releases expose the matching release function only as a
 runtime symbol. `fuse-napi` resolves and verifies that capability before every
 mount, so an incompatible macFUSE update fails safely with `EMACFUSEABI`.
@@ -262,7 +263,8 @@ capabilities and, on Linux, `fusermount3`, read/write access to `/dev/fuse`,
 and `user_allow_other` when `allowOther` or `allowRoot` is requested. Mounting
 performs this check automatically. Failures have stable codes such as
 `EFUSEHELPER`, `EFUSEDEVICE`, `EFUSEALLOWOTHER`, `EFUSEVERSION`, and
-`EMACFUSEABI`.
+`EMACFUSEVERSION`, and `EMACFUSEABI`. On macOS the preflight reads the installed
+macFUSE product version and rejects mounts below 5.3.1.
 
 The native request loop uses exactly `maxConcurrency` workers instead of
 libfuse's dynamically growing multithreaded loop. This bounds native
@@ -285,14 +287,19 @@ fuse.invalidateEntry('/archive/file-123', err => {
 ```
 
 Call `invalidateEntry` only after the client-side `close()` has returned, or
-from an independent housekeeping timer with a safety delay. Never call it
-from `getattr`, `open`, `release`, or another filesystem operation callback;
+from an independent housekeeping timer. Notifications run serially on a
+bounded, dedicated native worker, so a kernel reverse-invalidation lock cannot
+block the JavaScript event loop or exhaust libuv's shared worker pool. Never
+call it from `getattr`, `open`, `release`, or another filesystem operation callback;
 the method rejects operation-local calls with `EDEADLK` because Linux reverse
 invalidation can otherwise deadlock with the originating request. The method
 accepts nested paths, resolves the parent node, and sends portable
-`FUSE_NOTIFY_INVAL_ENTRY`. It returns `ENOSYS` if the connected kernel does not
-support the notification. A later access performs a fresh lookup, so choose a
-retention window that balances memory against metadata traffic.
+`FUSE_NOTIFY_INVAL_ENTRY`. macOS mounts require macFUSE 5.3.1+, whose VFS
+backend actually evicts the notified name-cache entry. The method returns
+`ENOSYS` if the connected kernel does not support the notification. At most
+1,024 notifications wait per mount; a larger concurrent burst returns `EAGAIN`
+instead of growing native memory without bound. A later access performs a fresh
+lookup, so choose a retention window that balances memory against metadata traffic.
 
 For a larger usage example, see CoCalc's
 [WebSocketFS FUSE integration](https://github.com/sagemathinc/websocketfs/tree/main/lib/fuse).
