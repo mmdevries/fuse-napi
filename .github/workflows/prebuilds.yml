@@ -211,7 +211,7 @@ jobs:
           xcrun vtool -show-build "$PREBUILD" | grep 'minos 12.0'
 
       - name: Upload prebuild
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prebuild-${{ matrix.platform }}-${{ matrix.arch }}-node${{ matrix.node-version }}
           path: prebuilds/
@@ -322,7 +322,7 @@ jobs:
           )" = GLIBC_2.31
 
       - name: Upload modern Linux prebuild
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prebuild-linux-${{ matrix.arch }}-fuse4-node${{ matrix.node-version }}
           path: prebuilds/
@@ -405,7 +405,7 @@ jobs:
           readelf -d "$PREBUILD" | grep 'libfuse3.so.4'
 
       - name: Upload musl prebuild
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prebuild-linux-${{ matrix.arch }}-fuse4-musl-node${{ matrix.node-version }}
           path: prebuilds/
@@ -590,7 +590,7 @@ jobs:
           sbom-path: fuse-napi-sbom.cdx.json
 
       - name: Upload npm tarball
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: npm-package
           path: |
