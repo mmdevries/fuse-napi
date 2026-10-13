@@ -232,6 +232,15 @@ extended attributes, statistics, and mount options are validated before they
 cross the native boundary. Unknown option and operation names are rejected so
 configuration mistakes cannot silently change filesystem behavior.
 
+Operation deadlines reply to FUSE with `ETIMEDOUT`. Linux cached reads can
+instead expose `EIO` to the caller when filling a page-cache entry fails.
+To preserve the original read errno, use `directIo: true` for the mount or
+return `{ fd, directIO: true }` from `open` or `create`. Direct I/O bypasses
+the page cache and has different caching and `mmap` semantics. A deadline
+does not cancel work already started by the handler: late callbacks are
+ignored, and request-owned buffers remain valid after completion and
+teardown.
+
 `Fuse.validateOptions(options)` performs the same synchronous validation
 without creating a filesystem instance. Invalid combinations throw a
 `TypeError` with a stable `code` and an `options` array. The FUSE 3 preflight
@@ -271,6 +280,105 @@ libfuse's dynamically growing multithreaded loop. This bounds native
 threads, outstanding JavaScript callbacks, and memory use under load. Mount
 startup runs outside the JavaScript event loop and remains subject to the
 configured `init` deadline.
+
+### Kernel passthrough (Linux)
+
+On Linux 6.9+ with libfuse 3.17+, an `open` or `create` handler can hand
+a file to the kernel, which then serves that handle's reads, writes, and
+`mmap` from a local backing file without calling `read` or `write`.
+Metadata operations still reach the filesystem.
+
+This example uses `backingPathFor(path)` to locate the backing file and
+`otherOperations` for metadata and ordinary `read`/`write` handlers. It
+shares registrations by the backing file's device and inode, including
+hard links, and releases each registration after its last handle closes.
+Opening and closing descriptors is asynchronous; registering an id and
+updating its reference count happen together without yielding.
+
+```js
+const backingFiles = new Map()
+const openHandles = new Map()
+const passthroughUnavailable = new Set(['ENOTSUP', 'ENOTTY', 'EPERM', 'ELOOP'])
+let passthroughEnabled = false
+
+function failOpen (fd, err, cb) {
+  fs.close(fd, () => cb(Fuse[err.code] || Fuse.EIO))
+}
+
+const fuse = new Fuse(mountpoint, {
+  ...otherOperations,
+  initWithConfig (connection, cb) {
+    passthroughEnabled = (connection.capable & Fuse.CAP_PASSTHROUGH) !== 0
+    const want = connection.want |
+      (connection.capable & Fuse.CAP_PASSTHROUGH)
+    // Permit backing files on one stacked filesystem, such as overlayfs.
+    cb(0, { want, maxBackingStackDepth: 1 })
+  },
+  open (path, flags, cb) {
+    fs.open(backingPathFor(path), flags, (err, fd) => {
+      if (err) return cb(Fuse[err.code] || Fuse.EIO)
+      fs.fstat(fd, { bigint: true }, (err, stat) => {
+        if (err) return failOpen(fd, err, cb)
+        const key = `${stat.dev}:${stat.ino}`
+        let entry = backingFiles.get(key)
+        if (!entry && passthroughEnabled) {
+          try {
+            entry = { key, id: fuse.backingOpen(fd), refs: 0 }
+            backingFiles.set(key, entry)
+          } catch (err) {
+            if (!passthroughUnavailable.has(err.code)) return failOpen(fd, err, cb)
+          }
+        }
+        if (entry) {
+          entry.refs++
+          openHandles.set(fd, entry)
+          cb(0, { fd, backingId: entry.id })
+        } else {
+          cb(0, fd) // Passthrough unavailable: use ordinary read and write.
+        }
+      })
+    })
+  },
+  release (path, fd, cb) {
+    const entry = openHandles.get(fd)
+    openHandles.delete(fd)
+    let backingError = null
+    if (entry && --entry.refs === 0) {
+      backingFiles.delete(entry.key)
+      try {
+        fuse.backingClose(entry.id)
+      } catch (err) {
+        backingError = err
+      }
+    }
+    fs.close(fd, err => {
+      err = backingError || err
+      cb(err ? Fuse[err.code] || Fuse.EIO : 0)
+    })
+  }
+})
+```
+
+`backingOpen(fd)` registers a regular file's descriptor and returns a
+backing id. It throws an Error whose `code` is the errno: `EPERM` when the
+mount did not negotiate `Fuse.CAP_PASSTHROUGH` or the process lacks
+`CAP_SYS_ADMIN`, `ELOOP` when the backing file is stacked deeper than
+`maxBackingStackDepth` allows, `ENOTTY` on a kernel without passthrough,
+and `ENOTSUP` when fuse-napi was built against libfuse older than 3.17.
+The kernel opens its own backing file per handle
+with that handle's open flags, so one id can serve every open of a file. It
+allows one backing file per inode: a second id for an inode that already has
+open passthrough handles fails those opens with `EIO`, so share one id per
+inode and release it with `backingClose(id)` after the last handle using it
+is released.
+
+A `backingId` cannot be combined with `keepCache` or `directIO`, nor with
+the `kernelCache`, `autoCache`, or `directIo` mount options; the kernel
+would fail the open with `EIO`, so fuse-napi rejects it first. When backing
+files live on a stacked filesystem such as overlayfs, also return
+`maxBackingStackDepth: 1` from `initWithConfig`. The kernel requires
+`CAP_SYS_ADMIN` in the initial user namespace for `backingOpen` and
+`backingClose`.
 
 ### Namespace cache housekeeping
 
@@ -342,8 +450,9 @@ snapshot of the portable FUSE 3 connection fields:
 `maxRead`, `capable`, `want`, `maxBackground`, and `congestionThreshold`.
 
 The callback may return a conservative configuration containing `maxWrite`,
-`maxReadahead`, `maxBackground`, `congestionThreshold`, `want`, and/or
-`asyncRead`.
+`maxReadahead`, `maxBackground`, `congestionThreshold`, `want`,
+`asyncRead`, and/or `maxBackingStackDepth` (see
+[Kernel passthrough](#kernel-passthrough-linux)).
 Requested limits may not exceed the values supplied by the kernel, `want`
 must be a subset of `capable`, and the congestion threshold may not exceed
 the background-request limit. Omitting the configuration preserves all

@@ -522,6 +522,37 @@ tape('operation failures, duplicate callbacks, and timeouts signal exactly once'
   }
 })
 
+tape('timed-out reads preserve native errno and ignore late callbacks', async function (t) {
+  const originalSignal = binding.fuse_native_signal_read
+  const calls = []
+  let complete
+  let delivered
+  const signalled = new Promise(resolve => { delivered = resolve })
+  binding.fuse_native_signal_read = function (nativeHandler, result) {
+    calls.push(result)
+    delivered()
+  }
+  try {
+    const fuse = new Fuse('/tmp/fuse-napi-read-timeout', {
+      read (name, fd, buffer, length, position, cb) {
+        complete = cb
+      }
+    }, { timeout: { default: false, read: 10 } })
+    const buffer = Buffer.alloc(4)
+    t.timeoutAfter(1000)
+    fuse._handlers[binding.op_read]({}, binding.op_read, '/file', 1, buffer, buffer.length, 0, 0)
+    await signalled
+    t.deepEqual(calls, [Fuse.ETIMEDOUT], 'the native boundary receives the original timeout errno')
+    complete(buffer.length)
+    complete(Fuse.EIO)
+    await new Promise(resolve => setImmediate(resolve))
+    t.deepEqual(calls, [Fuse.ETIMEDOUT], 'late success and error callbacks cannot send another native response')
+    t.doesNotThrow(() => buffer.write('safe'), 'the JavaScript request buffer survives completion')
+  } finally {
+    binding.fuse_native_signal_read = originalSignal
+  }
+})
+
 tape('64-bit statistics, offsets, and file handles remain lossless', function (t) {
   const large = 0x20000000000001n
   const beforeEpoch = -2208988800123
@@ -665,10 +696,11 @@ tape('enhanced open, create, readdir, and init contracts are lossless', function
 
   fuse._op_init(function (err, config) {
     t.equal(err, 0, 'validated init configuration succeeds')
-    t.deepEqual([...config], [63, 65536, 32768, 8, 4, 3, 0], 'init settings are encoded exactly')
+    t.deepEqual([...config], [63, 65536, 32768, 8, 4, 3, 0, 0], 'init settings are encoded exactly')
   }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12, 262144)
 
-  fuse._op_open(function (err, fd, flags) {
+  fuse._op_open(function (err, fd, flags, backingId) {
+    t.equal(backingId, 0, 'open without passthrough sends no backing id')
     t.equal(err, 0, 'enriched open succeeds')
     t.equal(fd, largeOffset, 'enriched open preserves the file handle')
     t.equal(flags, 7, 'all supported file-info result flags are encoded')
@@ -739,7 +771,7 @@ tape('legacy init remains compatible and maxRead is mount-only configuration', f
 
   legacy._op_init(function (err, config) {
     t.equal(err, 0, 'legacy init still completes successfully')
-    t.deepEqual([...config], [0, 0, 0, 0, 0, 0, 0], 'legacy init preserves the default configuration')
+    t.deepEqual([...config], [0, 0, 0, 0, 0, 0, 0, 0], 'legacy init preserves the default configuration')
   }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12, 262144)
   t.equal(legacyCalls, 1, 'legacy init is called exactly once')
 
@@ -1199,3 +1231,152 @@ function joinUint64 (array, index) {
 function joinInt64 (array, index) {
   return BigInt.asIntN(64, joinUint64(array, index))
 }
+
+tape('passthrough backing ids are validated before the native boundary', function (t) {
+  const reported = []
+  const results = {
+    '/backed': { fd: 7, backingId: 3 },
+    '/unbacked': { fd: 7, backingId: 0, keepCache: true },
+    '/negative': { fd: 7, backingId: -1 },
+    '/too-large': { fd: 7, backingId: 0x80000000 },
+    '/kept': { fd: 7, backingId: 3, keepCache: true },
+    '/direct': { fd: 7, backingId: 3, directIO: true }
+  }
+  const ops = {
+    open (name, flags, cb) {
+      cb(0, results[name])
+    },
+    createWithFlags (name, mode, flags, cb) {
+      cb(0, results[name])
+    },
+    opendir (name, flags, cb) {
+      cb(0, { fd: 1, backingId: 3 })
+    }
+  }
+  const onError = (err, operation) => reported.push([operation, err.message])
+  const fuse = new Fuse('/tmp/fuse-napi-passthrough-results', ops, { onError })
+
+  fuse._op_open(function (err, fd, flags, backingId) {
+    t.equal(err, 0, 'a backed open succeeds')
+    t.equal(fd, 7, 'the file handle is retained')
+    t.equal(flags, 0, 'no file-info flags are set')
+    t.equal(backingId, 3, 'the backing id reaches the native boundary')
+  }, '/backed', 0)
+  fuse._op_create(function (err, fd, flags, backingId) {
+    t.equal(err, 0, 'a backed create succeeds')
+    t.equal(backingId, 3, 'create forwards the backing id')
+  }, '/backed', 0o644, 0x241)
+  fuse._op_open(function (err, fd, flags, backingId) {
+    t.equal(err, 0, 'a zero backing id is ordinary daemon I/O')
+    t.equal(flags, 2, 'keepCache remains available without passthrough')
+    t.equal(backingId, 0, 'no backing id is sent')
+  }, '/unbacked', 0)
+  for (const name of ['/negative', '/too-large', '/kept', '/direct']) {
+    fuse._op_open(err => t.equal(err, Fuse.EIO, `${name} is refused with EIO`), name, 0)
+  }
+  fuse._op_opendir(function (err, ...rest) {
+    t.equal(err, Fuse.EIO, 'opendir cannot return a backing id')
+    t.equal(rest.length, 0, 'the refused opendir sends no file info')
+  }, '/', 0)
+
+  for (const option of ['kernelCache', 'autoCache', 'directIo']) {
+    const cached = new Fuse(`/tmp/fuse-napi-passthrough-${option}`, ops, { [option]: true, onError })
+    cached._op_open(err => t.equal(err, Fuse.EIO, `${option} mounts refuse a backing id`), '/backed', 0)
+  }
+
+  t.deepEqual(reported, [
+    ['open', 'file-info.backingId must be a non-negative 32-bit integer'],
+    ['open', 'file-info.backingId must be a non-negative 32-bit integer'],
+    ['open', 'file-info.backingId cannot be combined with keepCache or directIO'],
+    ['open', 'file-info.backingId cannot be combined with keepCache or directIO'],
+    ['opendir', 'file-info.backingId is only supported by open and create'],
+    ['open', 'file-info.backingId cannot be used with the kernelCache mount option'],
+    ['open', 'file-info.backingId cannot be used with the autoCache mount option'],
+    ['open', 'file-info.backingId cannot be used with the directIo mount option']
+  ], 'each refusal is reported with its reason')
+  t.end()
+})
+
+tape('maxBackingStackDepth is encoded in its own init slot and bounded', function (t) {
+  const reported = []
+  for (const depth of [0, 1, 2, 3]) {
+    const fuse = new Fuse(`/tmp/fuse-napi-backing-stack-depth-${depth}`, {
+      initWithConfig (connection, cb) {
+        cb(0, { maxBackingStackDepth: depth })
+      }
+    }, {
+      onError (err, operation) {
+        reported.push([operation, err.message])
+      }
+    })
+    fuse._waitForMount = () => {}
+    fuse._op_init(function (err, config) {
+      if (depth > 1) {
+        t.equal(err, Fuse.EIO, `backing depth ${depth} is refused before native negotiation`)
+        t.equal(config, undefined, 'no invalid configuration reaches the native boundary')
+      } else {
+        t.equal(err, 0, `backing depth ${depth} is accepted`)
+        t.deepEqual([...config], [64, 0, 0, 0, 0, 0, 0, depth], 'only the stack depth slot and mask are set')
+      }
+    }, 7, 29, 1, 131072, 65536, 0b1111, 0, 16, 12, 262144)
+  }
+
+  t.deepEqual(reported, [
+    ['init', 'init configuration.maxBackingStackDepth must be at most 1'],
+    ['init', 'init configuration.maxBackingStackDepth must be at most 1']
+  ], 'the refusal names the field and the limit')
+  t.end()
+})
+
+tape('backingOpen and backingClose validate input and preserve native errno', function (t) {
+  const originalOpen = binding.fuse_native_backing_open
+  const originalClose = binding.fuse_native_backing_close
+  const fuse = new Fuse('/tmp/fuse-napi-native-backing')
+
+  t.throws(() => fuse.backingOpen(3), err => err.code === 'ENOTCONN', 'backingOpen requires a mount')
+  t.throws(() => fuse.backingClose(1), err => err.code === 'ENOTCONN', 'backingClose requires a mount')
+
+  const thread = Buffer.alloc(8)
+  fuse._nativeMounted = true
+  fuse._thread = thread
+  for (const fd of [-1, 1.5, '3', 0x80000000]) {
+    t.throws(() => fuse.backingOpen(fd), TypeError, `backingOpen rejects ${String(fd)}`)
+  }
+  for (const id of [0, -1, 1.5, 0x80000000]) {
+    t.throws(() => fuse.backingClose(id), TypeError, `backingClose rejects ${String(id)}`)
+  }
+
+  const calls = []
+  let openResult = 9
+  let closeResult = 0
+  binding.fuse_native_backing_open = (receivedThread, fd) => {
+    calls.push(['open', receivedThread === thread, fd])
+    return openResult
+  }
+  binding.fuse_native_backing_close = (receivedThread, id) => {
+    calls.push(['close', receivedThread === thread, id])
+    return closeResult
+  }
+  try {
+    t.equal(fuse.backingOpen(5), 9, 'the native backing id is returned')
+    t.equal(fuse.backingClose(9), undefined, 'a successful close returns nothing')
+
+    openResult = Fuse.EPERM
+    t.throws(() => fuse.backingOpen(5), err => err.code === 'EPERM' && err.errno === Fuse.EPERM,
+      'a refused registration keeps its errno')
+    closeResult = Fuse.ENOENT
+    t.throws(() => fuse.backingClose(9), err => err.code === 'ENOENT' && err.errno === Fuse.ENOENT,
+      'an unknown backing id keeps its errno')
+  } finally {
+    binding.fuse_native_backing_open = originalOpen
+    binding.fuse_native_backing_close = originalClose
+  }
+
+  t.deepEqual(calls, [
+    ['open', true, 5],
+    ['close', true, 9],
+    ['open', true, 5],
+    ['close', true, 9]
+  ], 'the mount state and arguments reach native code')
+  t.end()
+})
